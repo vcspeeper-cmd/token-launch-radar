@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Radar — pre-token protocols ranked by implied value</title>
+<meta name="description" content="A ranked board of the protocols that record no token, scored by an implied value derived from TVL, seven-day growth and time running without a token.">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<a class="skip" href="#board">Skip to the board</a>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div class="brand-text">
+        <h1>Token Radar</h1>
+        <p class="brand-sub">Protocols that record no token, ranked by what one would be worth</p>
+      </div>
+    </div>
+    <dl class="masthead-meta">
+      <div><dt>Snapshot</dt><dd id="meta-as-of">—</dd></div>
+      <div><dt>Source</dt><dd id="meta-source">—</dd></div>
+      <div><dt>Model</dt><dd id="meta-model">—</dd></div>
+    </dl>
+  </div>
+</header>
+
+<main class="shell">
+  <section class="kpis" aria-label="Headline figures">
+    <article class="kpi">
+      <p class="kpi-label">Protocols scanned</p>
+      <p class="kpi-value" id="kpi-protocols">—</p>
+      <p class="kpi-note" id="kpi-protocols-note">—</p>
+    </article>
+    <article class="kpi kpi-accent">
+      <p class="kpi-label">Pre-token opportunities</p>
+      <p class="kpi-value" id="kpi-pretoken">—</p>
+      <p class="kpi-note" id="kpi-pretoken-note">—</p>
+    </article>
+    <article class="kpi">
+      <p class="kpi-label">Total implied value</p>
+      <p class="kpi-value" id="kpi-total">—</p>
+      <p class="kpi-note" id="kpi-total-note">—</p>
+    </article>
+    <article class="kpi">
+      <p class="kpi-label">Already trading</p>
+      <p class="kpi-value" id="kpi-live">—</p>
+      <p class="kpi-note" id="kpi-live-note">—</p>
+    </article>
+  </section>
+
+  <section class="controls" aria-label="Filters and sorting">
+    <div class="field field-search">
+      <label for="q">Search</label>
+      <input id="q" type="search" placeholder="Name, slug or category…" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="field">
+      <label for="status">Token status</label>
+      <select id="status">
+        <option value="pre">Pre-token only</option>
+        <option value="live">Already trading</option>
+        <option value="all">Both</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="tvl">Minimum TVL</label>
+      <select id="tvl">
+        <option value="0">Any size</option>
+        <option value="10000000">$10M and up</option>
+        <option value="50000000">$50M and up</option>
+        <option value="250000000">$250M and up</option>
+        <option value="1000000000">$1B and up</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="sort">Sort by</label>
+      <select id="sort">
+        <option value="implied">Implied value</option>
+        <option value="pressure">Launch pressure</option>
+        <option value="tvl">TVL</option>
+        <option value="growth">7-day growth</option>
+        <option value="age">Age without a token</option>
+        <option value="name">Name</option>
+        <option value="multiple">Category multiple</option>
+      </select>
+    </div>
+    <div class="field field-dir">
+      <label for="dir">Order</label>
+      <button id="dir" type="button" class="toggle" aria-pressed="true" title="Toggle ascending or descending (press D)">Descending</button>
+    </div>
+    <p class="count" id="count" role="status" aria-live="polite">—</p>
+  </section>
+
+  <section class="chips" aria-label="Category filter">
+    <span class="chips-label">Category</span>
+    <div class="chips-row" id="chips"></div>
+    <button id="chips-clear" type="button" class="link-button" hidden>Clear categories</button>
+  </section>
+
+  <section class="board-panel" id="board" tabindex="-1">
+    <div class="board-head">
+      <h2 id="board-title">The board</h2>
+      <p class="board-note" id="board-note">Ranked by implied value. Click any row for the full model and the farm plan.</p>
+    </div>
+    <div class="table-wrap">
+      <table id="table">
+        <thead>
+          <tr>
+            <th scope="col" class="col-rank">#</th>
+            <th scope="col" class="col-name">Protocol</th>
+            <th scope="col" class="col-cat">Category</th>
+            <th scope="col" class="col-num">TVL</th>
+            <th scope="col" class="col-num">7d</th>
+            <th scope="col" class="col-num">Age</th>
+            <th scope="col" class="col-num">Pressure</th>
+            <th scope="col" class="col-num">Implied value</th>
+            <th scope="col" class="col-bar">Share of rank 1</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="empty" hidden>
+      <p class="empty-title">No protocol matches those filters.</p>
+      <p>Try a shorter search, a lower TVL floor, or clear the category chips.</p>
+      <button type="button" class="button primary" id="empty-reset">Reset every filter</button>
+    </div>
+  </section>
+
+  <section class="histogram" aria-label="Distribution of implied values">
+    <div class="board-head">
+      <h2>Where the value sits</h2>
+      <p class="board-note">Every ranked protocol, by implied value. The board is bottom-heavy: most protocols are small, and a handful carry the total.</p>
+    </div>
+    <div class="hist" id="hist"></div>
+  </section>
+
+  <section class="method" aria-label="How the model works">
+    <h2>How the implied value is built</h2>
+    <p class="method-lede" id="method-sentence">—</p>
+    <ol class="method-steps">
+      <li><b>Category multiple.</b> The median market-cap-to-TVL ratio of the snapshot's own live-token peers in that category, clamped and shrunk toward a written prior by sample size. A category with fifteen live peers is trusted; one with a single peer falls back to the prior.</li>
+      <li><b>Growth and momentum.</b> The seven-day TVL move, clamped to ±50% and damped to 35% of its size, plus a signed-square-root read of the same move so a protocol bleeding deposits is penalised more than a flat one.</li>
+      <li><b>Maturity bell.</b> An asymmetric log-normal curve peaking near 300 days of running with no token: the fall-off is gentle below the peak and steep above it, because a protocol that has run for years with no token has had every chance to issue one.</li>
+      <li><b>Breadth and dust.</b> Each extra chain adds 4% up to five chains; a protocol under $5M of TVL is scaled down toward 75%.</li>
+    </ol>
+    <p class="method-foot">No protocol name is special-cased: the same function scores every row, and every row's detail view shows its own arithmetic.</p>
+  </section>
+</main>
+
+<footer class="foot">
+  <p id="foot-model">—</p>
+  <p class="foot-fine">The implied value is this dashboard's own claim, not make.fun's, and not a prediction that a token is issued. A protocol that records no token may still have one its record does not carry: verify before you commit capital.</p>
+</footer>
+
+<aside class="drawer" id="drawer" hidden aria-labelledby="drawer-title" role="dialog" aria-modal="false">
+  <div class="drawer-inner">
+    <div class="drawer-head">
+      <div>
+        <p class="drawer-kicker" id="drawer-kicker">—</p>
+        <h2 id="drawer-title">—</h2>
+        <p class="drawer-sub" id="drawer-sub">—</p>
+      </div>
+      <button type="button" class="close" id="drawer-close" aria-label="Close the detail view (Esc)">Close</button>
+    </div>
+    <div id="drawer-body"></div>
+  </div>
+</aside>
+
+/* The data is generated beside the page's directory: main.ts writes <out>/data.js and copies
+   dashboard/ to <out>/dashboard/, so the page loads ../data.js. A copy inside dashboard/ is also
+   accepted, so the page works from either layout. */
+<script src="../data.js"></script>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
