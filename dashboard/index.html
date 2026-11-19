@@ -91,6 +91,7 @@
       <button id="dir" type="button" class="toggle" aria-pressed="true" title="Toggle ascending or descending (press D)">Descending</button>
     </div>
     <p class="count" id="count" role="status" aria-live="polite">—</p>
+    <p class="seg" id="seg" hidden></p>
   </section>
 
   <section class="chips" aria-label="Category filter">
@@ -102,8 +103,9 @@
   <section class="board-panel" id="board" tabindex="-1">
     <div class="board-head">
       <h2 id="board-title">The board</h2>
-      <p class="board-note" id="board-note">Ranked by implied value. Click any row for the full model and the farm plan.</p>
+      <p class="board-note" id="board-note">Ranked by implied value = TVL × category multiple × growth × momentum × maturity × breadth × dust guard. Click any row for its own arithmetic and its farm plan.</p>
     </div>
+    <p class="legend">Launch pressure = maturity × growth × momentum × input confidence, with size left out on purpose: sort by it to find young, moving protocols rather than the biggest ones.</p>
     <div class="table-wrap">
       <table id="table">
         <thead>

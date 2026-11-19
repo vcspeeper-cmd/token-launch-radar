@@ -178,6 +178,11 @@ button { cursor: pointer; }
 .toggle { min-width: 132px; text-align: left; }
 .toggle[aria-pressed="true"]::after { content: " ↓"; color: var(--amber); }
 .toggle[aria-pressed="false"]::after { content: " ↑"; color: var(--amber); }
+/* The one-line summary of what the filters left. */
+.seg { grid-column: 1 / -1; margin: 0; padding-top: var(--s2); border-top: 1px solid var(--line-soft);
+  color: var(--ink-2); font-size: var(--t-sm); }
+.seg b { color: var(--ink); }
+.legend { margin: 0; padding: 0 var(--s4) var(--s3); color: var(--ink-3); font-size: var(--t-xs); max-width: 120ch; }
 .count {
   margin-left: auto; align-self: center;
   font-family: var(--font-num); font-size: var(--t-sm); color: var(--ink-2);
@@ -314,6 +319,7 @@ tr:nth-child(-n+3) .rank { color: var(--amber); font-weight: 600; }
   padding: var(--s8) var(--s5); text-align: center;
   display: grid; gap: var(--s3); justify-items: center;
 }
+.empty[hidden] { display: none; }
 .empty-title { font-size: var(--t-md); font-weight: 600; }
 .empty p { color: var(--ink-3); }
 .button {
@@ -373,7 +379,7 @@ tr:nth-child(-n+3) .rank { color: var(--amber); font-weight: 600; }
 
 .drawer {
   position: fixed; inset: 0 0 0 auto; z-index: 30;
-  width: min(620px, 94vw);
+  width: min(900px, 96vw);
   background: var(--canvas-2);
   border-left: 1px solid var(--line);
   box-shadow: var(--shadow);
@@ -400,7 +406,13 @@ tr:nth-child(-n+3) .rank { color: var(--amber); font-weight: 600; }
 }
 .close:hover { border-color: var(--ink-3); color: var(--ink); }
 
-.d-section { margin-top: var(--s5); }
+.d-section { margin-top: var(--s4); }
+/* Two columns inside the drawer: the record beside the arithmetic, so a reader sees the
+   factors and the number they produce without scrolling. */
+.d-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: var(--s4); align-items: start; }
+.d-cols .facts { grid-template-columns: 1fr; }
+.d-cols .d-section { margin-top: var(--s4); }
+@media (max-width: 820px) { .d-cols { grid-template-columns: 1fr; } }
 .d-section > h3 {
   font-size: var(--t-xs); text-transform: uppercase; letter-spacing: 0.1em;
   color: var(--ink-3); margin-bottom: var(--s3);

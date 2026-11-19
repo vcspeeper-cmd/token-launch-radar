@@ -227,6 +227,7 @@
 
     document.getElementById('count').textContent =
       rows.length + ' of ' + rowsForStatus().length + ' shown';
+    renderSegment(rows);
 
     if (rows.length === 0) {
       tbody.innerHTML = '';
@@ -262,6 +263,27 @@
       );
     }
     tbody.innerHTML = html.join('');
+  }
+
+  // What the filters left, in one line: how many rows, their combined implied value and the
+  // median, so a narrowed board says what it is and not only how many rows it hides.
+  function renderSegment(rows) {
+    var host = document.getElementById('seg');
+    if (!host) return;
+    var ranked = rows.filter(function (r) { return r.tokenStatus !== 'live'; });
+    var total = 0;
+    var values = [];
+    for (var i = 0; i < ranked.length; i++) {
+      total += ranked[i].implied_value_usd;
+      values.push(ranked[i].implied_value_usd);
+    }
+    values.sort(function (a, b) { return a - b; });
+    var median = values.length === 0 ? 0 : values[Math.floor(values.length / 2)];
+    host.hidden = ranked.length === 0 || ranked.length === DATA.rows.length;
+    if (host.hidden) return;
+    host.innerHTML = '<b>' + ranked.length + '</b> protocols in this slice · <b>' + fmtUsd(total) +
+      '</b> combined implied value · median <b>' + fmtUsd(median) + '</b>' +
+      (ranked.length > 0 ? ' · top of the slice: <b>' + esc(ranked[0].name) + '</b>' : '');
   }
 
   // ---------------------------------------------------------------- render: histogram
@@ -311,7 +333,7 @@
       '</div>'
     );
 
-    body.push('<div class="d-section"><h3>The record</h3><dl class="facts">' +
+    var recordHtml = '<div class="d-section"><h3>The record</h3><dl class="facts">' +
       fact('TVL', fmtUsdExact(row.tvl_usd)) +
       fact('7-day change', fmtPct(row.change_7d)) +
       fact('Age without a token', isLive ? 'trades' : fmtAge(row.age_days)) +
@@ -319,38 +341,42 @@
       fact('Category', row.category || 'Unknown') +
       fact('Token status', isLive ? 'already trades' : 'records no token') +
       fact('House watchlist', isLive ? 'not applicable' : (row.on_watchlist ? 'yes, on it' : 'no, below or outside it')) +
-      '</dl></div>');
+      '</dl></div>';
 
+    var arithHtml = '';
     if (!isLive && row.factors) {
       var f = row.factors;
       var recomputed = recompute(row);
-      body.push('<div class="d-section"><h3>The arithmetic</h3><div class="equation">' +
+      arithHtml = '<div class="d-section"><h3>The arithmetic</h3><div class="equation">' +
         eqRow('TVL', 'the snapshot\'s own figure', '×1.000', fmtUsdExact(row.tvl_usd)) +
         eqRow('Category multiple', f.category_peers > 0 && f.category_observed !== null
           ? 'prior ' + f.category_prior.toFixed(2) + ' blended with ' + f.category_peers + ' live peers at ' + f.category_observed.toFixed(3)
           : 'written prior, no live peers in this category', fmtFactor(f.category_multiple), '') +
         eqRow('Growth factor', '7-day move clamped to ' + f.growth_clamped_pct.toFixed(1) + '%', fmtFactor(f.growth_factor), '') +
-        eqRow('Momentum factor', 'signed square root of the same move, so a bleed costs more than a flat week', fmtFactor(f.momentum_factor || 1), '') +
-        eqRow('Maturity factor', 'asymmetric log-normal bell on ' + (row.age_days === null ? 'an unknown age' : row.age_days + ' days'), fmtFactor(f.maturity_factor), '') +
+        eqRow('Momentum factor', 'signed square root of the same move', fmtFactor(f.momentum_factor || 1), '') +
+        eqRow('Maturity factor', 'asymmetric bell on ' + (row.age_days === null ? 'an unknown age' : row.age_days + ' days'), fmtFactor(f.maturity_factor), '') +
         eqRow('Breadth factor', (row.chains || []).length + ' chain' + ((row.chains || []).length === 1 ? '' : 's'), fmtFactor(f.breadth_factor), '') +
         eqRow('Dust guard', row.tvl_usd < 25000000 ? 'TVL under $25M, scaled down' : 'TVL above $25M, no penalty', fmtFactor(f.size_guard), '') +
         '<div class="eq-total"><span>Implied value</span><b>' + fmtUsdExact(row.implied_value_usd) + '</b></div>' +
       '</div>' +
-      '<p class="confidence-note" style="margin-top:12px">' + recomputeNote(row, recomputed) + '</p>' +
-      '</div>');
+      '<p class="confidence-note" style="margin-top:10px">' + recomputeNote(row, recomputed) + '</p>' +
+      '</div>';
+    }
+    body.push('<div class="d-cols">' + recordHtml + arithHtml + '</div>');
 
-      body.push('<div class="d-section"><h3>Confidence in the inputs</h3><div class="confidence">' +
-        '<div class="confidence-bar"><i style="width:' + row.confidence + '%"></i></div>' +
-        '<p class="confidence-note">' + row.confidence + '/100 — a known age, a reported 7-day move, several chains and a real TVL are what make the arithmetic trustworthy. This is confidence in the inputs, never in the price.</p>' +
-      '</div></div>');
-
-      body.push('<div class="d-section"><h3>Launch pressure · ' + row.pressure.toFixed(0) + '/100</h3><div class="confidence">' +
-        '<div class="confidence-bar"><i style="width:' + row.pressure.toFixed(0) + '%"></i></div>' +
-        '<p class="confidence-note">The timing-and-momentum part of the model, normalised against the board\'s most launch-ready row. ' +
-        'It is the maturity bell times the growth and momentum factors times the input confidence, with size left out on purpose: ' +
-        'a small protocol that is young and growing can out-score a large one that is old and flat. Sort the board by it to see the ' +
-        'protocols whose record is moving, not just the biggest ones.</p>' +
-      '</div></div>');
+    if (!isLive && row.plan && row.plan.length > 0) {
+      body.push('<div class="d-section"><h3>The farm plan · ' + row.plan.length + ' steps, each with its cost and its time</h3>' +
+        '<p class="confidence-note" style="margin-bottom:10px">Capital $' + row.plan_meta.capital_usd +
+        ' · hold ' + row.plan_meta.hold_days + ' days · ' + row.plan_meta.cadence_per_week +
+        ' qualifying action' + (row.plan_meta.cadence_per_week === 1 ? '' : 's') + ' a week · ' +
+        row.plan_meta.age_band + ' protocol · a ' + row.plan_meta.action_class + ' position</p>' +
+        '<ol class="steps">' + row.plan.map(function (s) {
+          return '<li data-kind="' + esc(s.kind) + '"><div>' +
+            '<p class="step-text">' + esc(s.text) + '</p>' +
+            '<div class="step-chips"><span class="chip-cost">' + esc(s.cost) + '</span>' +
+            '<span class="chip-time">' + esc(s.time) + '</span></div>' +
+          '</div></li>';
+        }).join('') + '</ol></div>');
     }
 
     if (isLive) {
@@ -360,19 +386,16 @@
         (row.market_multiple === null ? '—' : '×' + row.market_multiple.toFixed(3)) + ' against its TVL.</p></div>');
     }
 
-    if (!isLive && row.plan && row.plan.length > 0) {
-      body.push('<div class="d-section"><h3>The farm plan · ' + row.plan.length + ' steps</h3>' +
-        '<p class="confidence-note" style="margin-bottom:12px">Capital $' + row.plan_meta.capital_usd +
-        ' · hold ' + row.plan_meta.hold_days + ' days · ' + row.plan_meta.cadence_per_week +
-        ' qualifying action' + (row.plan_meta.cadence_per_week === 1 ? '' : 's') + ' a week · ' +
-        row.plan_meta.age_band + ' protocol · ' + row.plan_meta.size_tier + ' TVL tier</p>' +
-        '<ol class="steps">' + row.plan.map(function (s) {
-          return '<li data-kind="' + esc(s.kind) + '"><div>' +
-            '<p class="step-text">' + esc(s.text) + '</p>' +
-            '<div class="step-chips"><span class="chip-cost">' + esc(s.cost) + '</span>' +
-            '<span class="chip-time">' + esc(s.time) + '</span></div>' +
-          '</div></li>';
-        }).join('') + '</ol></div>');
+    if (!isLive && row.factors) {
+      body.push('<div class="d-cols">' +
+        '<div class="d-section"><h3>Confidence in the inputs · ' + row.confidence + '/100</h3><div class="confidence">' +
+        '<div class="confidence-bar"><i style="width:' + row.confidence + '%"></i></div>' +
+        '<p class="confidence-note">A known age, a reported 7-day move, several chains and a real TVL are what make the arithmetic trustworthy. This is confidence in the inputs, never in the price.</p>' +
+        '</div></div>' +
+        '<div class="d-section"><h3>Launch pressure · ' + row.pressure.toFixed(0) + '/100</h3><div class="confidence">' +
+        '<div class="confidence-bar"><i style="width:' + row.pressure.toFixed(0) + '%"></i></div>' +
+        '<p class="confidence-note">The timing-and-momentum part of the model, normalised against the board\'s most launch-ready row: the maturity bell times growth and momentum times input confidence, with size left out on purpose.</p>' +
+        '</div></div></div>');
     }
 
     document.getElementById('drawer-body').innerHTML = body.join('');

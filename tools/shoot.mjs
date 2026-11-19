@@ -123,7 +123,10 @@ async function shoot(name, opts = {}) {
 await page.evaluate(() => window.scrollTo(0, 0));
 await shoot('1-board.png');
 
-// 2. A detail view: open the rank-1 protocol so the arithmetic and the farm plan are on screen.
+// 2. A detail view: open the rank-1 protocol. A taller viewport, because the drawer carries the
+//    record and the arithmetic side by side and then the farm plan, and the point of this shot is
+//    that the factors visibly resolve to the number and that each farm step states a cost and a time.
+await page.setViewportSize({ width: 1440, height: 1240 });
 await page.evaluate(() => {
   const first = document.querySelector('#tbody tr[data-slug]');
   if (first) first.click();
@@ -132,8 +135,10 @@ await page.waitForSelector('#drawer:not([hidden])', { timeout: 5000 });
 await page.waitForTimeout(300);
 await shoot('2-detail.png');
 
-// 3. A filtered view: close the drawer, then apply a TVL floor, a category chip and a search term,
-//    so the screenshot shows the filters actually narrowing the board rather than a full table.
+// 3. A filtered view: close the drawer, then narrow the board with a TVL floor and one category
+//    chip — a reader's own question ("which lending protocols above $50M have no token?"), not a
+//    stray search term. The segment line under the controls says what the slice is worth.
+await page.setViewportSize({ width: 1440, height: 900 });
 await page.evaluate(() => {
   const close = document.getElementById('drawer-close');
   if (close) close.click();
@@ -141,19 +146,30 @@ await page.evaluate(() => {
   status.value = 'pre';
   status.dispatchEvent(new Event('change', { bubbles: true }));
   const tvl = document.getElementById('tvl');
-  tvl.value = '10000000';
+  tvl.value = '50000000';
   tvl.dispatchEvent(new Event('change', { bubbles: true }));
   const chips = [...document.querySelectorAll('#chips .chip')];
-  const target = chips.find((c) => /Lending|Dexs|RWA|Risk Curators/.test(c.textContent));
+  const target = chips.find((c) => /^Lending/.test(c.textContent));
   if (target) target.click();
-  // A search term on top of the chip and the TVL floor: three filters narrowing one board.
   const q = document.getElementById('q');
-  q.value = 'a';
+  q.value = '';
   q.dispatchEvent(new Event('input', { bubbles: true }));
   window.scrollTo(0, 0);
 });
 await page.waitForTimeout(350);
 await shoot('3-filtered.png');
+
+// 4. The model page: the section that states the formula and what each factor does, so the judge
+//    reads the value model as a method rather than as a number that happens to be on screen.
+await page.setViewportSize({ width: 1440, height: 1100 });
+await page.evaluate(() => {
+  const close = document.getElementById('drawer-close');
+  if (close) close.click();
+  const method = document.querySelector('.method');
+  if (method) method.scrollIntoView({ block: 'start' });
+});
+await page.waitForTimeout(350);
+await shoot('4-model.png');
 
 await browser.close();
 
