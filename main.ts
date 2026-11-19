@@ -34,6 +34,11 @@ function arg(name: string, fallback: string): string {
   return withEquals === undefined ? fallback : withEquals.slice(name.length + 3);
 }
 
+/** A bare `--name` switch out of the arguments. */
+function flag(name: string): boolean {
+  return process.argv.includes(`--${name}`);
+}
+
 const inputArg = arg('input', '/input/snapshot.json');
 const inputFile = inputArg.endsWith('.json') ? inputArg : join(inputArg, 'snapshot.json');
 if (!existsSync(inputFile)) {
@@ -41,6 +46,17 @@ if (!existsSync(inputFile)) {
   process.exit(2);
 }
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
+const hashOnly = flag('hash-only');
+
+// The output directory is made before anything is scored: a run that cannot write must say so at
+// once, not after the whole board has been built and thrown away on a raw fs error.
+try {
+  mkdirSync(out, { recursive: true });
+} catch (err) {
+  const reason = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`token radar: cannot write the output directory ${out}: ${reason}\n`);
+  process.exit(2);
+}
 
 let snapshot;
 try {
@@ -53,6 +69,35 @@ try {
   throw err;
 }
 
+// `--verify-only` checks the board a previous run left behind instead of building a new one: it
+// scores nothing and writes nothing, so a reader can re-run the check on a handed-in board.
+if (flag('verify-only')) {
+  const boardFile = join(out, 'board.json');
+  if (!existsSync(boardFile)) {
+    process.stderr.write(`token radar: no board to verify at ${boardFile}: run without --verify-only first\n`);
+    process.exit(2);
+  }
+  let document: unknown;
+  try {
+    document = JSON.parse(readFileSync(boardFile, 'utf8'));
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`token radar: cannot read the board at ${boardFile}: ${reason}\n`);
+    process.exit(2);
+  }
+  const rows = (document as { rows?: unknown } | null)?.rows;
+  if (!Array.isArray(rows)) {
+    process.stderr.write(`token radar: the board at ${boardFile} has no rows array\n`);
+    process.exit(2);
+  }
+  const problems = verifyBoard(rows, snapshot);
+  for (const problem of problems) process.stderr.write(`token radar: board check: ${problem}\n`);
+  process.stdout.write(
+    `token radar: board check: ${rows.length} rows, ${problems.length === 0 ? 'no problems' : `${problems.length} problem${problems.length === 1 ? '' : 's'}`}\n`,
+  );
+  process.exit(problems.length === 0 ? 0 : 1);
+}
+
 const { rows, radar } = buildBoard(snapshot);
 const issue = boardIssue(rows, snapshot);
 if (issue !== null) {
@@ -60,7 +105,6 @@ if (issue !== null) {
   process.exit(1);
 }
 
-mkdirSync(out, { recursive: true });
 writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows })}\n`);
 writeFileSync(join(out, 'data.js'), dataScript(radar));
 
@@ -72,9 +116,11 @@ if (problems.length > 0) {
   for (const problem of problems) process.stderr.write(`token radar: board check: ${problem}\n`);
   process.exit(1);
 }
-process.stdout.write(
-  `token radar: board check: ${rows.length} rows, ranks 1..${rows.length}, watchlist covered, farm steps in range\n`,
-);
+if (!hashOnly) {
+  process.stdout.write(
+    `token radar: board check: ${rows.length} rows, ranks 1..${rows.length}, watchlist covered, farm steps in range\n`,
+  );
+}
 
 /**
  * Copy one directory's regular files into `to`, skipping names that start with a dot.
@@ -122,6 +168,10 @@ const contentHash = createHash('sha256');
 contentHash.update(readFileSync(join(out, 'board.json')));
 contentHash.update(readFileSync(join(out, 'data.js')));
 process.stdout.write(`token radar: content sha256 ${contentHash.digest('hex')}\n`);
+
+// `--hash-only` stops here: the hash line is the whole output, so a script can compare two runs
+// without parsing the prose that follows.
+if (hashOnly) process.exit(0);
 
 const top = rows[0]!;
 process.stdout.write(
