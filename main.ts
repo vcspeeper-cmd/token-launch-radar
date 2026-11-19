@@ -11,10 +11,11 @@
 // The board is the model's claim, never make.fun's: it says what a token would be worth if the
 // protocol's record stayed as it is, and it says so with the arithmetic on the page.
 
+import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { boardIssue, buildBoard, dataScript, parseSnapshot, SnapshotError } from './lib/model.ts';
+import { boardIssue, buildBoard, dataScript, parseSnapshot, SnapshotError, verifyBoard } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -63,6 +64,18 @@ mkdirSync(out, { recursive: true });
 writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows })}\n`);
 writeFileSync(join(out, 'data.js'), dataScript(radar));
 
+// The board is written; now read it back as data and check it before claiming success. A board the
+// program cannot stand behind is a failure, not a warning: every problem goes to stderr and the run
+// exits 1, so a broken board is never handed in.
+const problems = verifyBoard(rows, snapshot);
+if (problems.length > 0) {
+  for (const problem of problems) process.stderr.write(`token radar: board check: ${problem}\n`);
+  process.exit(1);
+}
+process.stdout.write(
+  `token radar: board check: ${rows.length} rows, ranks 1..${rows.length}, watchlist covered, farm steps in range\n`,
+);
+
 /**
  * Copy one directory's regular files into `to`, skipping names that start with a dot.
  *
@@ -102,6 +115,13 @@ writeFileSync(
   join(out, 'dossier.json'),
   buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: DASHBOARD_CAPS }),
 );
+
+// The content hash: sha256 over the exact bytes of board.json then data.js, in that order. Two runs
+// that write the same board print the same line, so a reader can compare them byte for byte.
+const contentHash = createHash('sha256');
+contentHash.update(readFileSync(join(out, 'board.json')));
+contentHash.update(readFileSync(join(out, 'data.js')));
+process.stdout.write(`token radar: content sha256 ${contentHash.digest('hex')}\n`);
 
 const top = rows[0]!;
 process.stdout.write(

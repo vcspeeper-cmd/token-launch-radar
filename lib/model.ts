@@ -404,6 +404,124 @@ export function boardIssue(rows: BoardRow[], snapshot: Snapshot): string | null 
   return null;
 }
 
+/**
+ * Every way the written board fails its own contract, as human-readable problems.
+ *
+ * This is the program checking its own output rather than trusting the code that built it: the
+ * rows are read back as data, so a rank that skipped, a value that rose as rank ascended, a
+ * watchlist slug that fell off or a farm step outside the gate's range is reported here. It never
+ * throws — a malformed row is a problem to print, not a crash — and returns [] when the board is
+ * clean.
+ */
+export function verifyBoard(rows: BoardRow[], snapshot: Snapshot): string[] {
+  const problems: string[] = [];
+  try {
+    if (!Array.isArray(rows)) return ['the board is not a list of rows'];
+    const list: unknown[] = rows;
+    const n = list.length;
+    if (n === 0) problems.push('the board holds no rows');
+
+    const known = new Set<string>();
+    for (const p of Array.isArray(snapshot?.protocols) ? snapshot.protocols : []) {
+      if (p !== null && typeof p === 'object' && typeof p.slug === 'string') known.add(p.slug);
+    }
+
+    const rankCounts = new Map<number, number>();
+    const seenSlugs = new Set<string>();
+    const ranked: { rank: number; value: number; slug: string }[] = [];
+
+    for (let i = 0; i < n; i++) {
+      const row = list[i] as Partial<BoardRow> | null | undefined;
+      if (row === null || typeof row !== 'object') {
+        problems.push(`row ${i + 1} is not an object`);
+        continue;
+      }
+      const slug = typeof row.slug === 'string' ? row.slug : '';
+      const at = slug === '' ? `row ${i + 1}` : `row ${i + 1} (${slug})`;
+
+      // The rank: a positive whole number, and the ranks together exactly 1..N.
+      const rank = row.rank;
+      const rankOk = typeof rank === 'number' && Number.isSafeInteger(rank) && rank > 0;
+      if (!rankOk) {
+        problems.push(`${at} has rank ${String(rank)}, not a positive whole number`);
+      } else {
+        rankCounts.set(rank, (rankCounts.get(rank) ?? 0) + 1);
+      }
+
+      // The slug: one of the snapshot's protocols.
+      if (slug === '') {
+        problems.push(`${at} has no slug`);
+      } else {
+        seenSlugs.add(slug);
+        if (!known.has(slug)) problems.push(`${at}: ${slug} is not one of the snapshot's protocols`);
+      }
+
+      // The farm steps: 3 to 12 strings, each 20 to 600 characters after trimming.
+      const steps = row.farm_steps;
+      if (!Array.isArray(steps)) {
+        problems.push(`${at} has no farm steps`);
+      } else {
+        if (steps.length < 3 || steps.length > 12) {
+          problems.push(`${at} has ${steps.length} farm steps, not 3 to 12`);
+        }
+        for (let s = 0; s < steps.length; s++) {
+          const step: unknown = steps[s];
+          if (typeof step !== 'string') {
+            problems.push(`${at} farm step ${s + 1} is not a string`);
+            continue;
+          }
+          const text = step.trim();
+          if (text.length < 20 || text.length > 600) {
+            problems.push(`${at} farm step ${s + 1} is ${text.length} characters after trimming, not 20 to 600`);
+          }
+        }
+      }
+
+      // The implied value, kept for the monotonic check below.
+      const value = row.implied_value_usd;
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        problems.push(`${at} has implied value ${String(value)}`);
+      } else if (rankOk) {
+        ranked.push({ rank: rank as number, value, slug });
+      }
+    }
+
+    // The ranks are exactly 1..N, once each.
+    for (let r = 1; r <= n; r++) {
+      const count = rankCounts.get(r) ?? 0;
+      if (count === 0) problems.push(`rank ${r} is missing from the board`);
+      else if (count > 1) problems.push(`rank ${r} appears ${count} times`);
+    }
+    for (const [rank, count] of rankCounts) {
+      if (rank > n) problems.push(`rank ${rank} is past the board's ${n} rows${count > 1 ? ` (${count} times)` : ''}`);
+    }
+
+    // The implied value never rises as rank ascends.
+    ranked.sort((a, b) => a.rank - b.rank);
+    for (let i = 1; i < ranked.length; i++) {
+      const prev = ranked[i - 1]!;
+      const cur = ranked[i]!;
+      if (cur.value > prev.value) {
+        problems.push(
+          `rank ${cur.rank} (${cur.slug}) has implied value $${cur.value}, above rank ${prev.rank} (${prev.slug}) at $${prev.value}`,
+        );
+      }
+    }
+
+    // Every watchlist slug is on the board.
+    const watchlist = Array.isArray(snapshot?.watchlist) ? snapshot.watchlist : [];
+    const missing = watchlist.filter((s) => typeof s === 'string' && !seenSlugs.has(s));
+    if (missing.length > 0) {
+      problems.push(
+        `the board misses ${missing.length} watchlist slug${missing.length === 1 ? '' : 's'}: ${missing.slice(0, 5).join(', ')}`,
+      );
+    }
+  } catch (err) {
+    problems.push(`the board could not be checked: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return problems;
+}
+
 /** The dashboard's data as one script: no fetch, no network, one global. */
 export function dataScript(radar: RadarData): string {
   return `window.RADAR=${JSON.stringify(radar)};\n`;
