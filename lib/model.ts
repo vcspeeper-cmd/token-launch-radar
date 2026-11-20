@@ -7,8 +7,17 @@
 //
 // The watchlist is the floor, never the ceiling. Every watchlist slug is on the board, and the board
 // adds the pre-token protocols below the floor that the radar exists to find.
+//
+// Every protocol the snapshot carries is accounted for exactly once: the ones on the board are
+// `ranked`, and every other one is filed by the ledger into the class that explains why it is not —
+// it records a token, it is a bridge, a staking receipt, a custody brand, a versioned pool, a
+// wrapped product, or simply too small. The ledger's counts sum to the snapshot's protocol count,
+// so no protocol is silently dropped.
+//
+// Everything written to data.js is deterministic: no clock, no random, no iteration over a Set or
+// Map without sorting first. Two runs over the same snapshot write the same bytes.
 
-import { calibrate, explain, isLaunchCandidate, isPreToken, median, MODEL, MODEL_SENTENCE, MODEL_VERSION, type CategoryCalibration, type Explanation, type ModelConstants, type Protocol } from './value.ts';
+import { calibrate, explain, isLaunchCandidate, isPreToken, median, MODEL_SENTENCE, MODEL_VERSION, type Calibration, type Explanation, type Holdout, type ModelFit, type Protocol } from './value.ts';
 import { farmPlan, planTexts, type FarmPlan } from './farm.ts';
 
 /** The snapshot document, exactly as the sealed input carries it. */
@@ -28,6 +37,24 @@ export class SnapshotError extends Error {
   }
 }
 
+/**
+ * The model's terms for one row, in log10 decades.
+ *
+ * Adding `intercept + tvl + age + ageMissing + momentum + chains + category` reproduces the row's
+ * log10 implied value, so a reader holding only the row can re-add the arithmetic and land on the
+ * dollar figure the board claims. The numbers are rounded to four places, which is a tenth of a
+ * percent of the dollar figure: the sum is honest to the digit the page prints.
+ */
+export interface RowFactors {
+  intercept: number;
+  tvl: number;
+  age: number;
+  ageMissing: number;
+  momentum: number;
+  chains: number;
+  category: number;
+}
+
 /** One row of board.json: the gate's shape plus the model's reasoning. */
 export interface BoardRow {
   rank: number;
@@ -44,51 +71,49 @@ export interface BoardRow {
   token_status: 'pre-token';
   age_days: number | null;
   implied_value_usd: number;
-  /** The category multiple the model used, and where it came from. */
-  multiple: number;
-  /** Every factor, so the board's number is auditable from the row alone. */
-  factors: {
-    category_multiple: number;
-    category_prior: number;
-    category_observed: number | null;
-    category_peers: number;
-    growth_factor: number;
-    growth_clamped_pct: number;
-    momentum_factor: number;
-    maturity_factor: number;
-    breadth_factor: number;
-    size_guard: number;
-  };
+  low50: number;
+  high50: number;
+  low80: number;
+  high80: number;
+  /** The six model terms, plus the intercept, as log10 decades: re-add them to audit the value. */
+  factors: RowFactors;
+  /** 0..100 confidence in the inputs, never in the price. */
   confidence: number;
   /** The launch-pressure score, normalised so the board's most launch-ready row is 100. */
   pressure: number;
   farm_steps: string[];
+  /** What the plan nets once gas and the capital's opportunity cost are paid. */
+  verdict: 'FARM' | 'THIN' | 'SKIP';
+  net_usd: number;
+}
+
+/** A plan step as the dashboard renders it: the action, its cost and its time kept apart. */
+export interface RadarPlanStep {
+  text: string;
+  cost: string;
+  time: string;
+  kind: string;
 }
 
 /** A row as the dashboard renders it: the board row plus the plan's structured steps. */
-export interface RadarRow {
-  rank: number;
-  slug: string;
-  name: string;
-  category: string | null;
-  chains: string[];
-  tvl_usd: number;
-  change_7d: number | null;
-  listed_at: string | null;
-  age_days: number | null;
-  implied_value_usd: number;
-  multiple: number;
-  factors: BoardRow['factors'];
-  confidence: number;
+export interface RadarRow extends BoardRow {
   tokenStatus: 'pre-token';
   /** Whether the house's watchlist names this protocol: the floor the board must cover. */
   on_watchlist: boolean;
-  /** The launch-pressure score, normalised so the board's most launch-ready row is 100. */
-  pressure: number;
-  farm_steps: string[];
   /** The plan's steps with cost and time kept apart, for the detail view's chips. */
-  plan: { text: string; cost: string; time: string; kind: string }[];
-  plan_meta: { capital_usd: number; hold_days: number; cadence_per_week: number; age_band: string; action_class: string };
+  plan: RadarPlanStep[];
+  plan_meta: {
+    capital_usd: number;
+    gas_usd: number;
+    opportunity_usd: number;
+    expected_airdrop_usd: number;
+    cost_usd: number;
+    hold_days: number;
+    cadence_per_week: number;
+    age_band: string;
+    size_tier: string;
+    action_class: string;
+  };
 }
 
 /** A protocol whose token already trades: the market's own value, never the model's. */
@@ -104,15 +129,28 @@ export interface LiveRow {
   market_multiple: number | null;
 }
 
-/** One category's calibration, as the dashboard shows it. */
+/** One category's fitted effect, as the dashboard shows it. */
 export interface CategoryRow {
   name: string;
-  klass: string;
-  count: number;
-  prior: number;
-  observed: number | null;
+  /** How many live peers the gamma rests on. */
   peers: number;
-  medianMultiple: number;
+  /** The fitted gamma in log10 decades; 0 for a category too thin to fit. */
+  gamma: number;
+  /** True when peers < 4: the category gets the size law alone, no fitted gamma. */
+  size_law_only: boolean;
+  /** How many board rows carry this category. */
+  rows: number;
+  /** The median residual of the category's live peers against the fitted surface, in decades. */
+  median_resid: number;
+}
+
+/** One class of the ledger: why a protocol is, or is not, on the board. */
+export interface LedgerRow {
+  code: string;
+  count: number;
+  reason: string;
+  /** Up to three protocol names from the class, the largest by TVL, so the count has a face. */
+  examples: string[];
 }
 
 /** One implied-value histogram bucket. */
@@ -123,6 +161,14 @@ export interface Bucket {
   count: number;
 }
 
+/** The board's rows projected onto the fit: live peers at the market's value, board rows at the model's. */
+export interface Scatter {
+  /** `[log10_tvl, log10_mcap, klass]`: klass 0 for a live peer, 1 for a ranked pre-token row. */
+  points: [number, number, number][];
+  /** The fitted line across the plotted x-range: `[[x0, y0], [x1, y1]]`. */
+  line: [[number, number], [number, number]];
+}
+
 /** Everything the dashboard needs, written to data.js as `window.RADAR`. */
 export interface RadarData {
   as_of: string;
@@ -130,21 +176,48 @@ export interface RadarData {
   floor_usd: number;
   model_version: string;
   model_sentence: string;
-  model: ModelConstants;
-  totals: { protocols: number; watchlist: number; preToken: number; liveToken: number; rows: number };
+  fit: ModelFit;
+  categories: CategoryRow[];
+  holdout: Holdout;
+  totals: { protocols: number; watchlist: number; preToken: number; liveToken: number; rows: number; farmable: number };
+  ledger: LedgerRow[];
   rows: RadarRow[];
   live: LiveRow[];
-  categories: CategoryRow[];
+  scatter: Scatter;
   buckets: Bucket[];
   /** The board's headline figures, so the page never recomputes a total differently. */
-  headline: { total_implied_usd: number; median_implied_usd: number; top_slug: string; top_name: string; top_value_usd: number };
+  headline: {
+    total_implied_usd: number;
+    median_implied_usd: number;
+    top_slug: string;
+    top_name: string;
+    top_value_usd: number;
+    farmable: number;
+    median_band50: number;
+  };
 }
-
-/** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
-export const EARLY_ROWS = 160;
 
 /** How many live-token protocols the dashboard's live view carries, by market cap. */
 export const LIVE_ROWS = 40;
+
+/** The categories whose TVL is a claim on an asset that already trades rather than a protocol of its own. */
+const BRIDGE_CATEGORIES = new Set(['Bridge', 'Canonical Bridge', 'Cross Chain Bridge']);
+const STAKING_CATEGORIES = new Set(['Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'Staking Pool']);
+
+/** A name ending in a release marker: a versioned pool of another protocol. */
+const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
+
+/** A name that says it is a wrapped or staked product of something else. */
+const WRAPPED_NAME = /\b(wrapped|staked|staking)\b/i;
+
+/** A name that begins with an exchange's own brand: custody, not a launch. */
+const EXCHANGE_NAME = /^(Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfinex|Gemini)\b/i;
+
+/** Round to `places`, so the written payload is byte-identical between runs. */
+function round(n: number, places: number): number {
+  const f = 10 ** places;
+  return Math.round(n * f) / f;
+}
 
 /** The snapshot out of a file's text, refused unless it is the shape the model scores. */
 export function parseSnapshot(text: string): Snapshot {
@@ -184,13 +257,13 @@ export function parseSnapshot(text: string): Snapshot {
 }
 
 /**
- * The protocols the board ranks: every launch candidate in the snapshot.
+ * The protocols the board ranks: every watchlist slug, plus every launch candidate in the snapshot.
  *
- * The watchlist is the floor, never the ceiling. Every watchlist slug is a launch candidate by
- * construction, so it is on the board; and so is every other protocol that records no token and is
- * not a wrapped, staked or bridged product of one that trades — including the ones above the floor
- * that the house's rule left out for a reason of its own, and the ones below the floor that the
- * radar exists to find. A protocol the list leaves out is no worse a subject.
+ * The watchlist is the floor, never the ceiling. Every watchlist slug is on the board by fiat; and
+ * so is every other protocol that records no token and is not a wrapped, staked or bridged product
+ * of one that trades — including the ones above the floor that the house's rule left out for a
+ * reason of its own, and the ones below the floor that the radar exists to find. There is no TVL
+ * floor here: a protocol the list leaves out is no worse a subject.
  */
 export function boardSubjects(snapshot: Snapshot): Protocol[] {
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
@@ -207,6 +280,63 @@ export function boardSubjects(snapshot: Snapshot): Protocol[] {
   return [...chosen.values()];
 }
 
+/**
+ * Every protocol in the snapshot filed into exactly one class, in the table's order of precedence.
+ *
+ * The board's subjects are `ranked`; everything else is explained by the first rule it trips: a
+ * recorded token, a bridge, a staking receipt, a custody brand, a versioned pool, a wrapped product,
+ * or a TVL under the snapshot's floor. The counts sum to `snapshot.protocols.length`, so the ledger
+ * is a full accounting and not a sample.
+ */
+export function ledger(snapshot: Snapshot): LedgerRow[] {
+  const subjects = new Set(boardSubjects(snapshot).map((p) => p.slug));
+  const classes: { code: string; reason: string }[] = [
+    { code: 'ranked', reason: 'on the board: a watchlist slug, or a protocol that records no token and is no wrapped, staked or bridged product of one that does' },
+    { code: 'token', reason: 'records a market cap, a symbol or a CoinGecko id, so its token already trades and its price is the market\'s, not the model\'s' },
+    { code: 'bridge', reason: 'a bridge, canonical bridge or cross-chain bridge: its TVL is a claim on assets that already trade elsewhere' },
+    { code: 'staking', reason: 'a liquid staking or restaking receipt: its TVL is a claim on a staked asset that already trades' },
+    { code: 'custody', reason: 'an exchange or custody brand: its TVL is customer funds, not a protocol of its own' },
+    { code: 'versioned', reason: 'a versioned pool of another protocol, so its TVL belongs to the protocol whose name it carries' },
+    { code: 'wrapped', reason: 'a wrapped or staked product of another protocol, so its TVL is that protocol\'s asset in another form' },
+    { code: 'below', reason: 'under the snapshot\'s floor and none of the above: too small to sit beside the board' },
+  ];
+  const members = new Map<string, Protocol[]>();
+  for (const c of classes) members.set(c.code, []);
+
+  for (const p of snapshot.protocols) {
+    if (subjects.has(p.slug)) {
+      members.get('ranked')!.push(p);
+    } else if (p.mcap_usd !== null || p.symbol !== null || p.gecko_id !== null) {
+      members.get('token')!.push(p);
+    } else if (BRIDGE_CATEGORIES.has(p.category ?? '')) {
+      members.get('bridge')!.push(p);
+    } else if (STAKING_CATEGORIES.has(p.category ?? '')) {
+      members.get('staking')!.push(p);
+    } else if (p.category === 'CEX' || EXCHANGE_NAME.test(p.name)) {
+      members.get('custody')!.push(p);
+    } else if (VERSIONED.test(p.name)) {
+      members.get('versioned')!.push(p);
+    } else if (WRAPPED_NAME.test(p.name)) {
+      members.get('wrapped')!.push(p);
+    } else {
+      members.get('below')!.push(p);
+    }
+  }
+
+  const rows: LedgerRow[] = classes.map((c, order) => {
+    const list = members.get(c.code)!;
+    // The examples are the class's largest protocols, so the count has a face and the choice is
+    // deterministic: TVL descending, then name ascending.
+    const examples = [...list]
+      .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      .slice(0, 3)
+      .map((p) => p.name);
+    return { code: c.code, count: list.length, reason: c.reason, examples };
+  });
+
+  return rows.sort((a, b) => b.count - a.count || classes.findIndex((c) => c.code === a.code) - classes.findIndex((c) => c.code === b.code));
+}
+
 /** The implied-value histogram: log decades, so a $1B row and a $2M row are both visible. */
 export function histogram(values: number[]): Bucket[] {
   const edges = [0, 1e6, 5e6, 1e7, 5e7, 1e8, 5e8, 1e9, 5e9, 1e10, 1e11, 1e12];
@@ -221,31 +351,36 @@ export function histogram(values: number[]): Bucket[] {
   return buckets;
 }
 
-/** The category table the dashboard shows: how many rows, and the multiple the model used. */
-export function categoryTable(subjects: Protocol[], table: Map<string, CategoryCalibration>): CategoryRow[] {
-  const counts = new Map<string, number>();
+/** The category table the dashboard shows: how many peers each gamma rests on, and how many rows it scores. */
+function categoryTable(subjects: Protocol[], cal: Calibration): CategoryRow[] {
+  const rowCounts = new Map<string, number>();
   for (const p of subjects) {
     const key = (p.category ?? 'Unknown').trim() || 'Unknown';
-    counts.set(key, (counts.get(key) ?? 0) + 1);
+    rowCounts.set(key, (rowCounts.get(key) ?? 0) + 1);
   }
+  const names = new Set<string>(rowCounts.keys());
+  for (const c of cal.categories) if (c.name !== '') names.add(c.name);
+
   const rows: CategoryRow[] = [];
-  for (const [name, count] of counts) {
-    const cal = table.get(name) ?? table.get('') ?? null;
-    const klass = cal?.klass ?? 'unknown';
-    const prior = cal?.prior ?? 0.4;
-    const observed = cal?.observed ?? null;
-    const peers = cal?.peers ?? 0;
-    const multiple = cal?.multiple ?? prior;
-    rows.push({ name, klass, count, prior, observed, peers, medianMultiple: multiple });
+  for (const name of [...names].sort()) {
+    const effect = cal.categories.find((c) => c.name === name) ?? null;
+    rows.push({
+      name,
+      peers: effect?.peers ?? 0,
+      gamma: effect?.gamma ?? 0,
+      size_law_only: effect === null || effect.peers < 4,
+      rows: rowCounts.get(name) ?? 0,
+      median_resid: effect?.medianResid ?? 0,
+    });
   }
-  return rows.sort((a, b) => b.count - a.count || (a.name < b.name ? -1 : 1));
+  return rows.sort((a, b) => b.rows - a.rows || b.peers - a.peers || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
-/** The live-token protocols, by market cap, for the dashboard's "already trading" view. */
-export function liveRows(snapshot: Snapshot): LiveRow[] {
+/** The live peers, by market cap: a recorded market cap and a positive TVL, the same population the fit uses. */
+function liveRows(snapshot: Snapshot): LiveRow[] {
   return snapshot.protocols
-    .filter((p) => !isPreToken(p) && p.category !== 'CEX')
-    .sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || b.tvl_usd - a.tvl_usd)
+    .filter((p) => p.mcap_usd !== null && Number.isFinite(p.mcap_usd) && p.mcap_usd > 0 && p.tvl_usd > 0)
+    .sort((a, b) => b.mcap_usd! - a.mcap_usd! || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
     .slice(0, LIVE_ROWS)
     .map((p) => ({
       slug: p.slug,
@@ -255,38 +390,77 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
       tvl_usd: p.tvl_usd,
       mcap_usd: p.mcap_usd,
       change_7d: p.change_7d,
-      market_multiple: p.mcap_usd !== null && p.tvl_usd > 0 ? Math.round((p.mcap_usd / p.tvl_usd) * 1e4) / 1e4 : null,
+      market_multiple: p.mcap_usd !== null && p.tvl_usd > 0 ? round(p.mcap_usd / p.tvl_usd, 4) : null,
     }));
 }
 
+/** The factors value.ts explains with, renamed to the six terms the page re-adds. */
+function factorsOf(e: Explanation): RowFactors {
+  return {
+    intercept: e.factors.alpha,
+    tvl: e.factors.tvl,
+    age: e.factors.age,
+    ageMissing: e.factors.age_missing,
+    momentum: e.factors.momentum,
+    chains: e.factors.chains,
+    category: e.factors.category,
+  };
+}
+
+/**
+ * The scatter: every live peer at the market's own value (class 0) and every ranked row at the
+ * model's projected value (class 1), with the fitted size law drawn across the plotted range.
+ * Every number is rounded to four decimals so two runs write identical bytes.
+ */
+function scatterOf(snapshot: Snapshot, rows: BoardRow[], fit: ModelFit): Scatter {
+  const live = snapshot.protocols
+    .filter((p) => p.mcap_usd !== null && Number.isFinite(p.mcap_usd) && p.mcap_usd > 0 && p.tvl_usd > 0)
+    .sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+
+  const points: [number, number, number][] = [];
+  for (const p of live) {
+    points.push([round(Math.log10(p.tvl_usd), 4), round(Math.log10(p.mcap_usd!), 4), 0]);
+  }
+  for (const r of rows) {
+    points.push([round(Math.log10(Math.max(r.tvl_usd, 1)), 4), round(Math.log10(Math.max(r.implied_value_usd, 1)), 4), 1]);
+  }
+
+  let x0 = Infinity;
+  let x1 = -Infinity;
+  for (const [x] of points) {
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+  }
+  if (!Number.isFinite(x0) || !Number.isFinite(x1) || x1 <= x0) {
+    x0 = 0;
+    x1 = 1;
+  }
+  // The line is the fitted size law alone: the intercept plus the TVL exponent, drawn across the
+  // plotted range so a reader can see how far a row sits above or below the surface.
+  const line: [[number, number], [number, number]] = [
+    [round(x0, 4), round(fit.alpha + fit.betaTvl * x0, 4)],
+    [round(x1, 4), round(fit.alpha + fit.betaTvl * x1, 4)],
+  ];
+  return { points, line };
+}
+
 /** The board and the dashboard payload, from one snapshot. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): { rows: BoardRow[]; radar: RadarData } {
-  const table = calibrate(snapshot.protocols, model);
+export function buildBoard(snapshot: Snapshot): { rows: BoardRow[]; radar: RadarData } {
+  const cal = calibrate(snapshot.protocols, snapshot.as_of);
   const subjects = boardSubjects(snapshot);
   const watchlist = new Set(snapshot.watchlist);
-  const scored = subjects.map((p) => ({ p, e: explain(p, snapshot.as_of, table, model) }));
+
+  const scored = subjects.map((p) => ({ p, e: explain(p, snapshot.as_of, cal) }));
   scored.sort((a, b) => b.e.implied_value_usd - a.e.implied_value_usd || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
-  // Normalise the pressure score against the board's own best row, so 100 is the most launch-ready
-  // protocol in this snapshot and every other row is read against it.
-  const topPressure = scored.reduce((n, s) => Math.max(n, s.e.pressure), 0) || 1;
+
   const rows: BoardRow[] = [];
   const radarRows: RadarRow[] = [];
   for (let i = 0; i < scored.length; i++) {
     const { p, e } = scored[i]!;
-    const plan: FarmPlan = farmPlan(p, e.age_days);
-    const factors: BoardRow['factors'] = {
-      category_multiple: e.multiple,
-      category_prior: e.prior,
-      category_observed: e.observed,
-      category_peers: e.peers,
-      growth_factor: e.growth_factor,
-      growth_clamped_pct: e.growth_clamped_pct,
-      momentum_factor: e.momentum_factor,
-      maturity_factor: e.maturity_factor,
-      breadth_factor: e.breadth_factor,
-      size_guard: e.size_guard,
-    };
-    rows.push({
+    const plan: FarmPlan = farmPlan(p, e.age_days, e.implied_value_usd, e.low50, e.high50);
+    const factors = factorsOf(e);
+    const steps = planTexts(plan);
+    const row: BoardRow = {
       rank: i + 1,
       slug: p.slug,
       name: p.name,
@@ -301,60 +475,64 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): {
       token_status: 'pre-token',
       age_days: e.age_days,
       implied_value_usd: e.implied_value_usd,
-      multiple: e.multiple,
+      low50: e.low50,
+      high50: e.high50,
+      low80: e.low80,
+      high80: e.high80,
       factors,
       confidence: e.confidence,
-      pressure: Math.round((e.pressure / topPressure) * 1000) / 10,
-      farm_steps: planTexts(plan),
-    });
+      pressure: e.pressure,
+      farm_steps: steps,
+      verdict: plan.verdict,
+      net_usd: plan.net_usd,
+    };
+    rows.push(row);
     radarRows.push({
-      rank: i + 1,
-      slug: p.slug,
-      name: p.name,
-      category: p.category,
-      chains: p.chains,
-      tvl_usd: p.tvl_usd,
-      change_7d: p.change_7d,
-      listed_at: p.listed_at,
-      age_days: e.age_days,
-      implied_value_usd: e.implied_value_usd,
-      multiple: e.multiple,
-      factors,
-      confidence: e.confidence,
+      ...row,
       tokenStatus: 'pre-token',
       on_watchlist: watchlist.has(p.slug),
-      pressure: Math.round((e.pressure / topPressure) * 1000) / 10,
-      farm_steps: planTexts(plan),
       plan: plan.steps.map((s) => ({ text: s.text, cost: s.cost, time: s.time, kind: s.kind })),
       plan_meta: {
         capital_usd: plan.capital_usd,
+        gas_usd: plan.gas_usd,
+        opportunity_usd: plan.opportunity_usd,
+        expected_airdrop_usd: plan.expected_airdrop_usd,
+        cost_usd: plan.cost_usd,
         hold_days: plan.hold_days,
         cadence_per_week: plan.cadence_per_week,
         age_band: plan.age_band,
+        size_tier: plan.size_tier,
         action_class: plan.action_class,
       },
     });
   }
 
-  const live = liveRows(snapshot);
   const values = rows.map((r) => r.implied_value_usd);
+  // The median 50% band half-width in dollars: how wide a claim the typical row carries.
+  const bandWidths = rows.map((r) => r.high50 - r.implied_value_usd);
+  const farmable = rows.filter((r) => r.verdict === 'FARM').length;
+
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
     floor_usd: snapshot.floor_usd,
     model_version: MODEL_VERSION,
     model_sentence: MODEL_SENTENCE,
-    model,
+    fit: cal.fit,
+    categories: categoryTable(subjects, cal),
+    holdout: cal.holdout,
     totals: {
       protocols: snapshot.protocols.length,
       watchlist: snapshot.watchlist.length,
       preToken: snapshot.protocols.filter(isPreToken).length,
       liveToken: snapshot.protocols.filter((p) => !isPreToken(p)).length,
       rows: rows.length,
+      farmable,
     },
+    ledger: ledger(snapshot),
     rows: radarRows,
-    live,
-    categories: categoryTable(subjects, table),
+    live: liveRows(snapshot),
+    scatter: scatterOf(snapshot, rows, cal.fit),
     buckets: histogram(values),
     headline: {
       total_implied_usd: values.reduce((n, v) => n + v, 0),
@@ -362,6 +540,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): {
       top_slug: rows[0]?.slug ?? '',
       top_name: rows[0]?.name ?? '',
       top_value_usd: rows[0]?.implied_value_usd ?? 0,
+      farmable,
+      median_band50: Math.round(median(bandWidths)),
     },
   };
   return { rows, radar };
@@ -526,5 +706,3 @@ export function verifyBoard(rows: BoardRow[], snapshot: Snapshot): string[] {
 export function dataScript(radar: RadarData): string {
   return `window.RADAR=${JSON.stringify(radar)};\n`;
 }
-
-export type { Explanation };

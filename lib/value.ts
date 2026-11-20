@@ -1,21 +1,54 @@
 // The value model: what a protocol's token would be worth if its record stayed as it is.
 //
-// Every number here is derived from the snapshot's own figures. Nothing is keyed on a protocol name.
+// The model is a fitted comparison, not a table of opinions. Every protocol in the snapshot whose
+// token already trades and that reports both a market cap and a positive TVL is a *live peer*: the
+// market has already put a price on it. Those peers are regressed on their own figures, in log10
+// space, and the surface that comes out is then applied to the protocols that record no token yet.
 //
-//   implied_value = tvl_usd
-//                 x category_multiple      (calibrated from the snapshot's own live-token peers)
-//                 x growth_factor          (from change_7d)
-//                 x maturity_factor        (from days since listed_at, relative to as_of)
-//                 x breadth_factor         (from chains.length)
-//                 x size_guard             (from tvl_usd, for dust)
+//   log10(mcap) = alpha
+//               + beta_tvl  * log10(tvl_usd)
+//               + beta_age  * log10(max(age_days, 1))
+//               + beta_miss * 1[listed_at is null]
+//               + beta_mom  * clamp(change_7d, -50, 50)
+//               + beta_chn  * log10(max(chains, 1))
+//               + gamma_c   * 1[category = c]
 //
-// The category multiple is the interesting part. A hardcoded table of "lending 0.55, dex 0.70" is a
-// guess. The snapshot already contains the answer: 144 protocols whose token trades carry both a
-// market cap and a TVL, so the median mcap/TVL of a category's live peers is an observed multiple for
-// that category. We take that observation, clamp it against outliers, and shrink it toward a written
-// prior by sample size (empirical Bayes). A category with 15 live peers is trusted; one with a single
-// peer falls back to the prior. The prior is documented below with its rationale, and it is only ever
-// a starting point that the data moves.
+// Why a log-log regression? Market cap does not add with TVL; it multiplies with it. A protocol with
+// twice the deposits is not worth $2 more, it is worth some *factor* more, and the factor is close to
+// constant across four orders of magnitude of TVL. Taking logs turns that multiplicative law into a
+// straight line, so least squares has something linear to solve, and it makes the residual an error in
+// *ratio* rather than in dollars: a $5M miss on a $10M protocol and a $500M miss on a $1B protocol are
+// the same mistake, and the fit treats them that way. The same is true of the other columns: age,
+// chain count and the 7-day move all act as factors on the value, so all of them enter in logs or as a
+// normalised score.
+//
+// The age coefficient is negative. Holding TVL fixed, among protocols whose token already trades, an
+// older protocol carries a *smaller* market cap: time accumulates deposits without accumulating the
+// speculative premium a young protocol is priced on, and the market pays for newness. That is the
+// fitted surface's own finding, not a prior imposed on it, and it is why the model can say that a
+// protocol which has run for years without a token is worth less per dollar of TVL than a young one.
+//
+// Two terms are deliberately not taken from the joint fit, and the page shows both numbers side by
+// side so the choice is visible rather than hidden:
+//
+//   * the 7-day move. The joint `betaMomentum` comes out slightly negative on the live peers, because
+//     across protocols a market cap is sticky while TVL moves: a protocol that just lost a third of
+//     its TVL shows a *higher* mcap/TVL. Applying that forward is a category error — it would make the
+//     board reward a collapse. The move therefore enters with a stated weight (`growth_weight`), a
+//     judgment written down here, not a coefficient fitted to the wrong question.
+//   * the age term. The joint `betaAge` is near zero because the category dummies absorb the age
+//     signal (old protocols cluster in Liquid Staking, young ones in Dexs). The age-only fit measures
+//     that effect on its own, without the dummies, and its coefficient is the one applied.
+//
+// The residual sigma is reported as a band rather than hidden. A point estimate would pretend the
+// regression is exact; it is not. The honest statement is "the centre is X, and the typical miss is a
+// factor of 10 ** sigma", so every row carries a 50% band and an 80% band built from that sigma, and
+// the holdout test says how often the truth actually landed inside them. A reader who sees only the
+// number would be misled about its precision; a reader who sees the band knows exactly what is claimed.
+//
+// There is no hand-written multiple anywhere in this file. No category is mapped to a number by hand:
+// the category term gamma is estimated from the peers, and a category with fewer than four live peers
+// gets gamma = 0 ("size law only") rather than an invented prior.
 
 /** One protocol as the snapshot carries it. */
 export interface Protocol {
@@ -31,121 +64,175 @@ export interface Protocol {
   symbol: string | null;
 }
 
-/** The model's tunable constants, stated in the dashboard and used by every row. */
-export interface ModelConstants {
-  /** How hard a 7-day move pushes the value: a +50% week is worth +17.5%, not +50%. */
-  growth_weight: number;
-  /** How hard the signed-square-root momentum read of the same move pushes the value. */
-  momentum_weight: number;
-  /** The 7-day move is clamped here, in per cent, so one parabolic week cannot own the board. */
-  growth_clamp_pct: number;
-  /** The maturity curve's peak, in days since listing. */
-  maturity_peak_days: number;
-  /** The maturity curve's width in log-space below the peak: young protocols keep more upside. */
-  maturity_width_young: number;
-  /** The maturity curve's width in log-space above the peak: old protocols decay faster. */
-  maturity_width_old: number;
-  /** The maturity curve's floor and lift: factor = floor + lift * bell(age). */
-  maturity_floor: number;
-  maturity_lift: number;
-  /** The maturity factor for a protocol with no listing date: no view, so neutral. */
-  maturity_unknown: number;
-  /** Each extra chain beyond the first adds this much, up to `breadth_cap` extra chains. */
-  breadth_step: number;
-  breadth_cap: number;
-  /** Below `dust_floor_usd` a protocol is scaled down; by `dust_full_usd` it is at full weight. */
-  dust_floor_usd: number;
-  dust_full_usd: number;
-  dust_min_factor: number;
-  /** The shrinkage strength: a category needs this many live peers to be half-trusted. */
-  shrink_k: number;
-  /** An observed category multiple is clamped into this absolute band before it is trusted. */
-  observed_min: number;
-  observed_max: number;
-  /** The observation may move the prior by at most this factor down and up. */
-  observed_band_low: number;
-  observed_band_high: number;
-  /** Below this many live peers an observation is noise and carries no weight at all. */
-  min_peers: number;
+export const MODEL_VERSION = "radar-3/fitted-comps";
+
+/** The fitted coefficients of the log-log surface, and what its residuals look like. */
+export interface ModelFit {
+  alpha: number;
+  betaTvl: number;
+  /**
+   * The joint fit's age coefficient. It is reported as fitted, but it is *not* the one the board
+   * applies: the category dummies absorb the age signal (old protocols cluster in Liquid Staking,
+   * young ones in Dexs), so `ageApplied` — the age-only coefficient — carries it instead.
+   */
+  betaAge: number;
+  betaAgeMissing: number;
+  /**
+   * The joint fit's momentum coefficient. Reported as fitted; not applied, because across live
+   * peers it comes out negative (market cap is sticky while TVL moves), and applying it forward
+   * would reward a collapse. The board uses the stated `momentumApplied` weight instead.
+   */
+  betaMomentum: number;
+  betaChains: number;
+  /** The stated weight actually applied to the clamped 7-day move (see `MODEL.growth_weight`). */
+  momentumApplied: number;
+  /** The age coefficient actually applied: `ageOnly.betaAge`, or the joint `betaAge` when `ageOnly.n` is 0. */
+  ageApplied: number;
+  /** sqrt(SSR / (n - k)): the residual standard deviation, in log10 decades. */
+  sigma: number;
+  r2: number;
+  /** The number of live peers the fit used. */
+  n: number;
+  /** 10 ** (0.6745 * sigma): the factor for a 50% band (the interquartile band). */
+  band50: number;
+  /** 10 ** (1.2816 * sigma): the factor for an 80% band. */
+  band80: number;
+  /**
+   * The bare size-and-age fit: an ordinary least-squares regression of log10(mcap) on
+   * log10(tvl_usd) and log10(max(age_days, 1)) alone, over the live peers that carry a listing
+   * date. It says what the age term is worth on its own, before the category dummies absorb part
+   * of it.
+   */
+  ageOnly: { betaTvl: number; betaAge: number; r2: number; n: number };
+  /**
+   * How many live peers the consistency screen held out of the regression. A market cap and a TVL
+   * are collected by different upstream jobs, and a handful of records pair a market cap from one
+   * snapshot with a TVL from another — a $70k market cap against a $1.1B TVL is not a valuation,
+   * it is two numbers from different days. Those rows still appear on the board (they are real
+   * protocols with real deposits), but they cannot teach the surface what a dollar of TVL is worth,
+   * so they are excluded from the fit and counted here rather than silently dropped.
+   */
+  excluded: number;
+  /** The market-cap-to-TVL band the screen accepts, as `[low, high]`; rows outside it are held out. */
+  ratioBand: [number, number];
 }
 
-export const MODEL: ModelConstants = {
-  growth_weight: 0.35,
-  momentum_weight: 0.12,
-  growth_clamp_pct: 50,
-  maturity_peak_days: 300,
-  maturity_width_young: 1.15,
-  maturity_width_old: 0.62,
-  maturity_floor: 0.72,
-  maturity_lift: 0.48,
-  maturity_unknown: 1,
-  breadth_step: 0.04,
-  breadth_cap: 5,
-  dust_floor_usd: 5_000_000,
-  dust_full_usd: 25_000_000,
-  dust_min_factor: 0.75,
-  shrink_k: 8,
-  observed_min: 0.02,
-  observed_max: 3,
-  observed_band_low: 0.5,
-  observed_band_high: 2,
-  min_peers: 3,
-};
+/** One category's fitted effect, measured against the rest of the fitted surface. */
+export interface CategoryEffect {
+  name: string;
+  /** How many live peers in the snapshot carry this category. */
+  peers: number;
+  /** The median residual (log10) of this category's peers against the fitted surface. */
+  medianResid: number;
+  /** The fitted gamma in log10 decades; 0 when the category is too thin to fit. */
+  gamma: number;
+  /** True when the category had fewer than four live peers, so gamma is 0 by the size law alone. */
+  shrunk: boolean;
+}
 
-export const MODEL_VERSION = 'radar-2/empirical-bayes';
+/** The out-of-sample check the page shows as evidence that the surface is not memorised. */
+export interface Holdout {
+  trainN: number;
+  testN: number;
+  alpha: number;
+  betaTvl: number;
+  sigma: number;
+  /** The median of 10 ** |error|: "the typical miss is 3.4x". */
+  medianAbsDex: number;
+  /** The share of test rows whose truth fell inside the holdout's 50% band. */
+  hit50: number;
+  /** The share of test rows whose truth fell inside the holdout's 80% band. */
+  hit80: number;
+}
+
+/** Everything `calibrate` reports, and everything `explain` needs. */
+export interface Calibration {
+  fit: ModelFit;
+  categories: CategoryEffect[];
+  holdout: Holdout;
+  /**
+   * The strongest timing score on the board's own population: the denominator that turns a row's
+   * timing term into a 0..100 pressure reading without a second pass over the rows. Carried on the
+   * calibration so `explain` can normalise a single row; it is attached non-enumerably, so the
+   * calibration still serialises as exactly `{ fit, categories, holdout }`.
+   */
+  pressureMax?: number;
+}
+
+/** The arithmetic for one protocol: the log10 contribution of every term, so a reader can re-add them. */
+export interface Explanation {
+  slug: string;
+  name: string;
+  category: string | null;
+  tvl_usd: number;
+  age_days: number | null;
+  change_7d: number | null;
+  chains: number;
+  /** The sum of `factors`, before exponentiation. */
+  log10_implied: number;
+  implied_value_usd: number;
+  low50: number;
+  high50: number;
+  low80: number;
+  high80: number;
+  /** The log10 contribution of each term; adding them reproduces `log10_implied`. */
+  factors: {
+    alpha: number;
+    tvl: number;
+    age: number;
+    age_missing: number;
+    momentum: number;
+    chains: number;
+    category: number;
+  };
+  /** The fitted gamma actually used for this row's category (0 when unseen or thin). */
+  category_gamma: number;
+  /** How many live peers this row's category rests on. */
+  category_peers: number;
+  /** 0..100 confidence in the inputs, not in the price. */
+  confidence: number;
+  /** 0..100 launch pressure: the timing term alone, normalised against the board's best row. */
+  pressure: number;
+}
+
+/** The ridge on every non-intercept coefficient: it keeps a thin column from owning the fit. */
+const RIDGE = 1.0;
+/** The lighter ridge on a category dummy, so a category with four peers can still move its gamma. */
+const RIDGE_CATEGORY = 0.05;
+/** The 7-day move enters the regression in percentage points, clamped so one parabolic week cannot own it. */
+const MOMENTUM_CLAMP = 50;
 
 /**
- * The written prior, by category class, with the reasoning for each. These are the multiples a
- * protocol's fully diluted value would carry against its TVL if the market priced it like the median
- * protocol in its class. They are deliberately conservative: a pre-token protocol has no float, no
- * price discovery and no buyback, so the prior sits below the observed median of live peers.
- *
- *   class            prior  why
- *   chain            1.00   an L1/L2 is valued on the whole economy it secures, not its TVL alone
- *   perps/options    0.85   derivatives venues earn fees on volume, which is a multiple of TVL
- *   rwa              0.80   tokenised assets carry an off-chain asset and a fee stream
- *   dex              0.70   an AMM's TVL is its inventory; fee take is thin but the venue is durable
- *   launchpad        0.60   a launchpad's TVL is idle raise capacity, but its deal flow is scarce
- *   stable/cdp       0.60   a stablecoin's TVL is its supply and its value is the seigniorage share
- *   lending          0.55   a lender's TVL is deposits; the spread is real but competes away
- *   curator/allocator 0.50  a curator's TVL is other people's capital, and its fee is a few bps
- *   yield/basis      0.45   yield wrappers are commoditised and their TVL chases the best rate
- *   prediction       0.55   a prediction market's TVL is open interest, thin but high-margin
- *   restaking/lrt    0.35   a restaking receipt is a claim on an asset that already trades
- *   bridge           0.30   a bridge's TVL is in transit and its fee is a rounding error
- *   insurance        0.25   cover is priced on loss expectancy, not on the pool it sits in
- *   unknown          0.40   no category: the middle of the table, and the model says so
+ * The stated constants of the *applied* model — the numbers the board uses when it is not a fitted
+ * coefficient. `growth_weight` is a judgment and is written down as one: the 7-day move enters at
+ * 0.35 of its percentage, so a +50% week is worth +17.5% of implied value and a -50% week -17.5%,
+ * and the clamp stays at ±50 so one parabolic week cannot own the row. The fitted `betaMomentum` is
+ * still reported beside it, but it is not applied: it answers "what multiple does the market pay a
+ * protocol that moved this week", and across live peers that answer has the wrong sign, because a
+ * market cap is sticky while TVL moves — a protocol that just lost a third of its TVL shows a higher
+ * mcap/TVL. Applying it forward would make the board reward a collapse, which is a category error.
  */
-const PRIORS: ReadonlyArray<readonly [RegExp, number, string]> = [
-  [/^(chain|l1|l2|rollup)$/i, 1.0, 'chain'],
-  [/perpetual|derivative|synthetic|option|perps/i, 0.85, 'perps/options'],
-  [/rwa|real world|tokeni[sz]ed/i, 0.8, 'rwa'],
-  [/dex|amm|exchange|market maker|liquidity manager/i, 0.7, 'dex'],
-  [/launchpad|incubator/i, 0.6, 'launchpad'],
-  [/stable|cdp|collateral|reserve currency/i, 0.6, 'stable/cdp'],
-  [/lend|credit|borrow/i, 0.55, 'lending'],
-  [/curator|allocator|vault|index/i, 0.5, 'curator/allocator'],
-  [/prediction/i, 0.55, 'prediction'],
-  [/yield|farm|basis|staking pool|governance/i, 0.45, 'yield/basis'],
-  [/restak|lrt|restaked|liquid staking|staking/i, 0.35, 'restaking/lrt'],
-  [/bridge|cross chain|canonical/i, 0.3, 'bridge'],
-  [/insurance|cover/i, 0.25, 'insurance'],
-];
+export const MODEL = {
+  growth_weight: 0.35,
+} as const;
+/** A category needs at least this many live peers before its gamma is fitted rather than set to zero. */
+const PEER_MIN = 4;
+/** The holdout trains on the oldest share of the peers and tests on the newest. */
+const TRAIN_SHARE = 0.7;
+/** The normal quantile for a 50% band. */
+const Q50 = 0.6745;
+/** The normal quantile for an 80% band. */
+const Q80 = 1.2816;
+/** The gate's ceiling on an implied value: a safe integer of at most 1e14 dollars. */
+const MAX_USD = 100_000_000_000_000;
+const MAX_LOG10 = Math.log10(MAX_USD);
 
-/** The class a category falls in, and its prior. Unseen categories land on `unknown`. */
-export function categoryClass(category: string | null): { klass: string; prior: number } {
-  const c = (category ?? '').trim();
-  if (c === '') return { klass: 'unknown', prior: 0.4 };
-  for (const [re, prior, klass] of PRIORS) if (re.test(c)) return { klass, prior };
-  return { klass: 'unknown', prior: 0.4 };
-}
+const DAY_MS = 86_400_000;
 
 /** A finite number, else `fallback`. */
 export function finite(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
-
-const DAY_MS = 86_400_000;
 
 /** Whole days from `listed_at` to `as_of`, clamped at zero; null when either date is missing or bad. */
 export function ageDays(asOf: string, listedAt: string | null): number | null {
@@ -164,11 +251,6 @@ export function isPreToken(p: Protocol): boolean {
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
 const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
 
-/** Whether a protocol is one the board may rank: pre-token, not an exchange, not a versioned pool. */
-export function isRankable(p: Protocol): boolean {
-  return isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name);
-}
-
 /**
  * The categories whose TVL is a claim on an asset that already trades rather than a protocol of its
  * own: a canonical bridge holds wrapped assets, a liquid staking token is a receipt for a staked
@@ -176,13 +258,21 @@ export function isRankable(p: Protocol): boolean {
  * and so does the board: ranking WBTC as a launch opportunity would be a category error, because
  * Bitcoin's token already trades and WBTC is Bitcoin on Ethereum.
  */
-const PRODUCT_CATEGORIES = new Set(['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX']);
+const PRODUCT_CATEGORIES = new Set([
+  "Bridge",
+  "Canonical Bridge",
+  "Liquid Staking",
+  "Liquid Restaking",
+  "Restaked BTC",
+  "CEX",
+]);
 
 /** A name that says it is a wrapped or staked product of something else. */
 const PRODUCT_NAME = /\b(wrapped|staked|staking)\b/i;
 
 /** A name that begins with an exchange's own brand: custody, not a launch. */
-const EXCHANGE_NAME = /^(Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfinex|Gemini)\b/i;
+const EXCHANGE_NAME =
+  /^(Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfinex|Gemini)\b/i;
 
 /**
  * Whether a protocol is a launch candidate: it records no token, and it is not a wrapped, staked or
@@ -192,7 +282,7 @@ const EXCHANGE_NAME = /^(Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfinex|Gemin
  */
 export function isLaunchCandidate(p: Protocol): boolean {
   if (!isPreToken(p)) return false;
-  if (PRODUCT_CATEGORIES.has(p.category ?? '')) return false;
+  if (PRODUCT_CATEGORIES.has(p.category ?? "")) return false;
   if (VERSIONED.test(p.name)) return false;
   if (PRODUCT_NAME.test(p.name)) return false;
   if (EXCHANGE_NAME.test(p.name)) return false;
@@ -207,239 +297,560 @@ export function median(values: number[]): number {
   return s.length % 2 === 1 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
 }
 
-/** One category's calibration: the prior, what the live peers show, and the multiple that results. */
-export interface CategoryCalibration {
-  klass: string;
-  prior: number;
-  /** The median mcap/TVL of the category's live-token peers, clamped; null when it has none. */
-  observed: number | null;
-  /** How many live peers with both a market cap and a TVL the observation rests on. */
-  peers: number;
-  /** The weight the observation carries: peers / (peers + shrink_k). */
-  weight: number;
-  /** The multiple the model uses: the shrunk blend, rounded to four places. */
-  multiple: number;
+const round = (n: number, places: number): number => {
+  const f = 10 ** places;
+  return Math.round(n * f) / f;
+};
+
+/** A category's column key: trimmed, and empty for a protocol that names none. */
+function categoryKey(category: string | null): string {
+  return (category ?? "").trim();
+}
+
+/** The 7-day move as the regression sees it: percentage points, clamped both ways, 0 when unknown. */
+function momentumOf(change7d: number | null): number {
+  const raw = finite(change7d, 0);
+  return Math.min(MOMENTUM_CLAMP, Math.max(-MOMENTUM_CLAMP, raw));
+}
+
+/** One live peer prepared as a row of the design matrix. */
+interface Sample {
+  slug: string;
+  category: string;
+  listedAt: string | null;
+  /** log10(mcap_usd): the response. */
+  y: number;
+  /** log10(tvl_usd). */
+  tvl: number;
+  /** log10(max(age_days, 1)); 0 when the listing date is unknown. */
+  age: number;
+  /** 1 when listed_at is null, else 0. */
+  missing: number;
+  /** The clamped 7-day move in percentage points. */
+  mom: number;
+  /** log10(max(chains.length, 1)). */
+  chains: number;
 }
 
 /**
- * Calibrate every category the snapshot names from the snapshot's own live-token protocols.
+ * The band of market-cap-to-TVL ratios the snapshot is treated as internally consistent in.
  *
- * A live protocol carries a market cap and a TVL, so mcap/TVL is the multiple the market actually
- * pays for that category today. We take the median (robust to the 400x outlier a single prediction
- * market produces), clamp it into a sane band, and blend it with the written prior by sample size.
- * The result is a table that is mostly observed where the data is thick and mostly prior where it is
- * thin, and it moves if the snapshot moves.
+ * A market cap and a TVL come from different upstream jobs. Most records pair numbers from the
+ * same day and land inside a factor of fifty either way; a handful do not — a $70k market cap
+ * against a $1.1B TVL is not a cheap protocol, it is a stale market cap sitting next to a fresh
+ * TVL. Those records are real and stay on the board, but they cannot teach the surface what a
+ * dollar of TVL is worth, so the fit holds them out and reports the count.
  */
-export function calibrate(protocols: Protocol[], model: ModelConstants = MODEL): Map<string, CategoryCalibration> {
-  const peers = new Map<string, number[]>();
+const RATIO_MIN = 1 / 50;
+const RATIO_MAX = 50;
+
+/**
+ * The live peers: a protocol whose token trades (so a market cap is recorded), with a real market
+ * cap and a positive TVL. A zero or negative market cap is a missing observation, not a valuation,
+ * so it cannot enter a log. A market cap and a TVL that disagree by more than `RATIO_MAX` in either
+ * direction are held out of the regression and returned in `excluded`, so the caller can report
+ * how many rows the screen set aside.
+ */
+function liveSamples(
+  protocols: Protocol[],
+  asOf: string
+): { samples: Sample[]; excluded: number } {
+  const out: Sample[] = [];
+  let excluded = 0;
   for (const p of protocols) {
-    if (isPreToken(p)) continue;
-    if (p.mcap_usd === null || !(p.tvl_usd > 0)) continue;
-    const key = (p.category ?? '').trim();
+    if (p.mcap_usd === null || !Number.isFinite(p.mcap_usd) || p.mcap_usd <= 0)
+      continue;
+    if (!(p.tvl_usd > 0) || !Number.isFinite(p.tvl_usd)) continue;
     const ratio = p.mcap_usd / p.tvl_usd;
-    if (!Number.isFinite(ratio) || ratio <= 0) continue;
-    const list = peers.get(key);
-    if (list === undefined) peers.set(key, [ratio]);
-    else list.push(ratio);
-  }
-  const out = new Map<string, CategoryCalibration>();
-  const seen = new Set<string>();
-  for (const p of protocols) {
-    const key = (p.category ?? '').trim();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const { klass, prior } = categoryClass(p.category);
-    const list = peers.get(key) ?? [];
-    // An observation is only trusted when it rests on enough peers, and even then it may only move the
-    // prior within a band. One live peer in a category is an anecdote, not a multiple: a single
-    // curator's market cap would otherwise reprice every curator on the board.
-    const enough = list.length >= model.min_peers;
-    const rawObserved = enough ? median(list) : null;
-    const observed =
-      rawObserved === null
-        ? null
-        : Math.min(
-            model.observed_max,
-            Math.max(model.observed_min, Math.min(prior * model.observed_band_high, Math.max(prior * model.observed_band_low, rawObserved))),
-          );
-    const weight = enough ? list.length / (list.length + model.shrink_k) : 0;
-    const blended = observed === null ? prior : prior * (1 - weight) + observed * weight;
-    out.set(key, {
-      klass,
-      prior,
-      observed: observed === null ? null : round4(observed),
-      peers: list.length,
-      weight: round4(weight),
-      multiple: round4(Math.min(model.observed_max, Math.max(model.observed_min, blended))),
+    if (ratio < RATIO_MIN || ratio > RATIO_MAX) {
+      excluded += 1;
+      continue;
+    }
+    const age = ageDays(asOf, p.listed_at);
+    out.push({
+      slug: p.slug,
+      category: categoryKey(p.category),
+      listedAt: p.listed_at,
+      y: Math.log10(p.mcap_usd),
+      tvl: Math.log10(p.tvl_usd),
+      age: Math.log10(Math.max(age ?? 0, 1)),
+      missing: age === null ? 1 : 0,
+      mom: momentumOf(p.change_7d),
+      chains: Math.log10(Math.max(p.chains.length, 1)),
     });
   }
-  return out;
+  return { samples: out, excluded };
 }
 
-const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
+/** A fresh k x k matrix of zeros. */
+function zeros(k: number): number[][] {
+  const m: number[][] = [];
+  for (let i = 0; i < k; i++) m.push(new Array<number>(k).fill(0));
+  return m;
+}
 
-/** The multiple for one protocol's category, from a calibration table. */
-export function multipleFor(category: string | null, table: Map<string, CategoryCalibration>): CategoryCalibration {
-  const key = (category ?? '').trim();
-  const hit = table.get(key);
-  if (hit !== undefined) return hit;
-  const { klass, prior } = categoryClass(category);
-  return { klass, prior, observed: null, peers: 0, weight: 0, multiple: prior };
+/** The design row: intercept, five log/clamped terms, then one dummy per fitted category. */
+function designRow(
+  s: Sample,
+  catIndex: Map<string, number>,
+  width: number
+): number[] {
+  const row = new Array<number>(width).fill(0);
+  row[0] = 1;
+  row[1] = s.tvl;
+  row[2] = s.age;
+  row[3] = s.missing;
+  row[4] = s.mom;
+  row[5] = s.chains;
+  const idx = catIndex.get(s.category);
+  if (idx !== undefined) row[6 + idx] = 1;
+  return row;
 }
 
 /**
- * The maturity bell: 1 at the peak, falling off in log-space on both sides.
+ * Solve A x = b by Gaussian elimination with partial pivoting, in place on an augmented copy.
+ * Returns null when the matrix is singular even after the ridge, which the caller treats as a
+ * degenerate fit rather than a crash.
+ */
+function gaussSolve(A: number[][], b: number[]): number[] | null {
+  const n = b.length;
+  const M: number[][] = A.map((row, i) => {
+    const copy = row.slice();
+    copy.push(b[i]!);
+    return copy;
+  });
+  for (let col = 0; col < n; col++) {
+    let pivot = col;
+    for (let r = col + 1; r < n; r++) {
+      if (Math.abs(M[r]![col]!) > Math.abs(M[pivot]![col]!)) pivot = r;
+    }
+    if (Math.abs(M[pivot]![col]!) < 1e-12) return null;
+    if (pivot !== col) {
+      const tmp = M[pivot]!;
+      M[pivot] = M[col]!;
+      M[col] = tmp;
+    }
+    const p = M[col]![col]!;
+    for (let r = col + 1; r < n; r++) {
+      const f = M[r]![col]! / p;
+      if (f === 0) continue;
+      for (let c = col; c <= n; c++) M[r]![c] = M[r]![c]! - f * M[col]![c]!;
+    }
+  }
+  const x = new Array<number>(n).fill(0);
+  for (let r = n - 1; r >= 0; r--) {
+    let sum = M[r]![n]!;
+    for (let c = r + 1; c < n; c++) sum -= M[r]![c]! * x[c]!;
+    x[r] = sum / M[r]![r]!;
+  }
+  return x;
+}
+
+interface CoreFit {
+  coef: number[];
+  sigma: number;
+  r2: number;
+  k: number;
+}
+
+/** Predict one sample from a coefficient vector, including the category dummy when it is fitted. */
+function predict(
+  coef: number[],
+  s: Sample,
+  catIndex: Map<string, number>
+): number {
+  let v =
+    coef[0]! +
+    coef[1]! * s.tvl +
+    coef[2]! * s.age +
+    coef[3]! * s.missing +
+    coef[4]! * s.mom +
+    coef[5]! * s.chains;
+  const idx = catIndex.get(s.category);
+  if (idx !== undefined) v += coef[6 + idx]!;
+  return v;
+}
+
+/**
+ * The ordinary least squares fit on the normal equations, with the ridge described above.
  *
- * The curve is deliberately asymmetric. Below the peak a protocol is still finding its market, so the
- * fall-off is gentle — a 90-day-old protocol keeps most of the upside. Above the peak the fall-off is
- * steep, because a protocol that has run for years with no token has had every chance to issue one,
- * and the market has already priced that absence. A symmetric bell would treat a 60-day protocol and
- * a 1500-day one as equally likely to launch, which is the opposite of what the record says.
+ * We build X'X and X'y once, add the ridge to the diagonal (nothing on the intercept, `RIDGE` on the
+ * five shared slopes, `RIDGE_CATEGORY` on each category dummy), and solve with partial pivoting. No
+ * library: the design is at most a few dozen columns wide.
  */
-export function maturityBell(days: number, model: ModelConstants = MODEL): number {
-  if (!(days > 0)) return 0;
-  const z = Math.log(days / model.maturity_peak_days);
-  const width = z < 0 ? model.maturity_width_young : model.maturity_width_old;
-  return Math.exp(-(z * z) / width);
+function fitCore(
+  samples: Sample[],
+  catIndex: Map<string, number>
+): CoreFit | null {
+  if (samples.length === 0) return null;
+  const k = 6 + catIndex.size;
+  const XtX = zeros(k);
+  const Xty = new Array<number>(k).fill(0);
+  for (const s of samples) {
+    const row = designRow(s, catIndex, k);
+    for (let i = 0; i < k; i++) {
+      const ri = row[i]!;
+      if (ri === 0) continue;
+      Xty[i] = Xty[i]! + ri * s.y;
+      for (let j = i; j < k; j++) XtX[i]![j] = XtX[i]![j]! + ri * row[j]!;
+    }
+  }
+  // X'X is symmetric; the loop above filled the upper triangle only.
+  for (let i = 0; i < k; i++)
+    for (let j = 0; j < i; j++) XtX[i]![j] = XtX[j]![i]!;
+  for (let i = 0; i < k; i++) {
+    if (i === 0) continue;
+    XtX[i]![i] = XtX[i]![i]! + (i < 6 ? RIDGE : RIDGE_CATEGORY);
+  }
+  const coef = gaussSolve(XtX, Xty);
+  if (coef === null) return null;
+
+  let ssr = 0;
+  let sumY = 0;
+  for (const s of samples) {
+    const err = s.y - predict(coef, s, catIndex);
+    ssr += err * err;
+    sumY += s.y;
+  }
+  const meanY = sumY / samples.length;
+  let sst = 0;
+  for (const s of samples) {
+    const d = s.y - meanY;
+    sst += d * d;
+  }
+  const denom = Math.max(1, samples.length - k);
+  return {
+    coef,
+    sigma: Math.sqrt(ssr / denom),
+    r2: sst > 0 ? 1 - ssr / sst : 0,
+    k,
+  };
 }
 
-/** The maturity factor for an age in days (null: the neutral value). */
-export function maturityFactor(days: number | null, model: ModelConstants = MODEL): number {
-  if (days === null) return model.maturity_unknown;
-  return model.maturity_floor + model.maturity_lift * maturityBell(days, model);
-}
-
-/** The growth factor from a 7-day move in per cent (null: neutral). */
-export function growthFactor(change7d: number | null, model: ModelConstants = MODEL): number {
-  const raw = finite(change7d, 0);
-  const clamped = Math.min(model.growth_clamp_pct, Math.max(-model.growth_clamp_pct, raw));
-  return 1 + (clamped / 100) * model.growth_weight;
+/** The fallback when even the ridged system is singular: a flat surface at the mean, with its spread. */
+function flatFit(samples: Sample[]): CoreFit {
+  const mean =
+    samples.reduce((a, s) => a + s.y, 0) / Math.max(1, samples.length);
+  let ss = 0;
+  for (const s of samples) ss += (s.y - mean) ** 2;
+  const coef = new Array<number>(6).fill(0);
+  coef[0] = mean;
+  return {
+    coef,
+    sigma: Math.sqrt(ss / Math.max(1, samples.length - 1)),
+    r2: 0,
+    k: 6,
+  };
 }
 
 /**
- * The momentum factor: a second, smaller read of the same seven-day move, shaped so that a protocol
- * which is *growing* is rewarded more than one which is merely large, and one which is bleeding TVL is
- * penalised more than a flat one.
+ * The size-and-age fit on its own: ordinary least squares of log10(mcap) on an intercept,
+ * log10(tvl_usd) and log10(max(age_days, 1)), over the live peers whose listing date is known.
+ * No ridge and no category dummies: the point is to report what the age term is worth before the
+ * categories take part of it. A singular system falls back to zeros with n still reported.
+ */
+function ageOnlyFit(samples: Sample[]): ModelFit["ageOnly"] {
+  const rows = samples.filter((s) => s.listedAt !== null);
+  const n = rows.length;
+  if (n === 0) return { betaTvl: 0, betaAge: 0, r2: 0, n: 0 };
+  const XtX = zeros(3);
+  const Xty = new Array<number>(3).fill(0);
+  for (const s of rows) {
+    const row = [1, s.tvl, s.age];
+    for (let i = 0; i < 3; i++) {
+      Xty[i] = Xty[i]! + row[i]! * s.y;
+      for (let j = i; j < 3; j++) XtX[i]![j] = XtX[i]![j]! + row[i]! * row[j]!;
+    }
+  }
+  for (let i = 0; i < 3; i++)
+    for (let j = 0; j < i; j++) XtX[i]![j] = XtX[j]![i]!;
+  const coef = gaussSolve(XtX, Xty);
+  if (coef === null) return { betaTvl: 0, betaAge: 0, r2: 0, n };
+  let ssr = 0;
+  let sumY = 0;
+  for (const s of rows) {
+    const pred = coef[0]! + coef[1]! * s.tvl + coef[2]! * s.age;
+    ssr += (s.y - pred) ** 2;
+    sumY += s.y;
+  }
+  const meanY = sumY / n;
+  let sst = 0;
+  for (const s of rows) sst += (s.y - meanY) ** 2;
+  return {
+    betaTvl: round(coef[1] ?? 0, 6),
+    betaAge: round(coef[2] ?? 0, 6),
+    r2: round(sst > 0 ? 1 - ssr / sst : 0, 6),
+    n,
+  };
+}
+
+/** The coefficient vector expanded into the named fit the page prints. */
+function namedFit(
+  core: CoreFit,
+  n: number,
+  ageOnly: ModelFit["ageOnly"],
+  excluded: number
+): ModelFit {
+  const c = core.coef;
+  const betaAge = round(c[2] ?? 0, 6);
+  return {
+    alpha: round(c[0] ?? 0, 6),
+    betaTvl: round(c[1] ?? 0, 6),
+    betaAge,
+    betaAgeMissing: round(c[3] ?? 0, 6),
+    betaMomentum: round(c[4] ?? 0, 6),
+    betaChains: round(c[5] ?? 0, 6),
+    momentumApplied: MODEL.growth_weight,
+    // The category dummies absorb the age signal, so the age-only estimate is the one that
+    // carries it. Fall back to the joint estimate only when the age-only fit had no rows.
+    ageApplied: ageOnly.n > 0 ? ageOnly.betaAge : betaAge,
+    sigma: round(core.sigma, 6),
+    r2: round(core.r2, 6),
+    n,
+    band50: round(10 ** (Q50 * core.sigma), 4),
+    band80: round(10 ** (Q80 * core.sigma), 4),
+    ageOnly,
+    excluded,
+    ratioBand: [round(RATIO_MIN, 6), round(RATIO_MAX, 6)],
+  };
+}
+
+/** The confidence a row's inputs earn: about the inputs, never about the price. */
+function confidenceOf(p: Protocol, age: number | null, peers: number): number {
+  let c = 40;
+  if (age !== null) c += 20;
+  if (p.change_7d !== null) c += 15;
+  if (p.chains.length >= 2) c += 10;
+  if (p.tvl_usd >= 50_000_000) c += 10;
+  if (peers >= 5) c += 5;
+  return Math.min(100, c);
+}
+
+/** The out-of-sample test: train on the oldest peers, predict the newest ones. */
+function holdoutOf(
+  samples: Sample[],
+  catIndex: Map<string, number>,
+  fallbackSigma: number
+): Holdout {
+  const sorted = [...samples].sort((a, b) => {
+    if (a.listedAt === null && b.listedAt === null)
+      return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0;
+    if (a.listedAt === null) return 1;
+    if (b.listedAt === null) return -1;
+    if (a.listedAt !== b.listedAt) return a.listedAt < b.listedAt ? -1 : 1;
+    return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0;
+  });
+  const trainN = Math.floor(sorted.length * TRAIN_SHARE);
+  const train = sorted.slice(0, trainN);
+  const test = sorted.slice(trainN);
+  const core = fitCore(train, catIndex);
+  if (core === null || test.length === 0) {
+    return {
+      trainN,
+      testN: test.length,
+      alpha: 0,
+      betaTvl: 0,
+      sigma: round(fallbackSigma, 6),
+      medianAbsDex: 0,
+      hit50: 0,
+      hit80: 0,
+    };
+  }
+  const errors = test.map((s) =>
+    Math.abs(s.y - predict(core.coef, s, catIndex))
+  );
+  return {
+    trainN,
+    testN: test.length,
+    alpha: round(core.coef[0] ?? 0, 6),
+    betaTvl: round(core.coef[1] ?? 0, 6),
+    sigma: round(core.sigma, 6),
+    medianAbsDex: round(median(errors.map((e) => 10 ** e)), 3),
+    hit50: round(
+      errors.filter((e) => e <= Q50 * core.sigma).length / test.length,
+      4
+    ),
+    hit80: round(
+      errors.filter((e) => e <= Q80 * core.sigma).length / test.length,
+      4
+    ),
+  };
+}
+
+/**
+ * Fit the surface on the snapshot's live peers and report it, along with each category's fitted
+ * effect and the holdout test.
  *
- * The shape is a signed square root: a +4% week and a -4% week are not symmetric events, because a
- * protocol that is losing a tenth of its TVL a week is losing the deposits a launch would be priced
- * on. The square root also compresses the extremes, so the momentum term nudges the ranking instead of
- * dominating it the way a linear term would.
+ * `asOf` is the snapshot date; ages are measured against it. The same calibration must be passed to
+ * every `explain` call so the board is one consistent model rather than a per-row fit.
  */
-export function momentumFactor(change7d: number | null, model: ModelConstants = MODEL): number {
-  if (change7d === null || !Number.isFinite(change7d)) return 1;
-  const clamped = Math.min(model.growth_clamp_pct, Math.max(-model.growth_clamp_pct, change7d));
-  const shaped = Math.sign(clamped) * Math.sqrt(Math.abs(clamped) / model.growth_clamp_pct);
-  return 1 + shaped * model.momentum_weight;
+export function calibrate(protocols: Protocol[], asOf: string): Calibration {
+  const { samples, excluded } = liveSamples(protocols, asOf);
+
+  const peerCounts = new Map<string, number>();
+  for (const s of samples)
+    peerCounts.set(s.category, (peerCounts.get(s.category) ?? 0) + 1);
+
+  // Only a category with enough live peers earns a dummy; the rest are "size law only".
+  const fitted = [...peerCounts.entries()]
+    .filter(([, count]) => count >= PEER_MIN)
+    .map(([name]) => name)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const catIndex = new Map<string, number>();
+  fitted.forEach((name, i) => catIndex.set(name, i));
+
+  const core = fitCore(samples, catIndex) ?? flatFit(samples);
+  const fit = namedFit(core, samples.length, ageOnlyFit(samples), excluded);
+  const holdout = holdoutOf(samples, catIndex, core.sigma);
+
+  // Each category's residual is measured against the full fitted surface, so the page can show
+  // whether a category's peers sit above or below the size law even when gamma is fitted.
+  const residuals = new Map<string, number[]>();
+  for (const s of samples) {
+    const r = s.y - predict(core.coef, s, catIndex);
+    const list = residuals.get(s.category);
+    if (list === undefined) residuals.set(s.category, [r]);
+    else list.push(r);
+  }
+
+  const categories: CategoryEffect[] = [...peerCounts.entries()]
+    .map(([name, peers]) => {
+      const idx = catIndex.get(name);
+      return {
+        name,
+        peers,
+        medianResid: round(median(residuals.get(name) ?? []), 6),
+        gamma: idx === undefined ? 0 : round(core.coef[6 + idx] ?? 0, 6),
+        shrunk: idx === undefined,
+      };
+    })
+    .sort(
+      (a, b) =>
+        b.peers - a.peers || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+    );
+
+  // The pressure denominator is the strongest timing score on the board's own population: the
+  // launch candidates are exactly the rows the board can carry, so every row's pressure is
+  // comparable within one snapshot and no second pass over the rows is needed. It is attached
+  // non-enumerably so the returned calibration is still exactly { fit, categories, holdout }.
+  let pressureMax = 0;
+  for (const p of protocols) {
+    if (!isLaunchCandidate(p)) continue;
+    const age = ageDays(asOf, p.listed_at);
+    const { ageTerm, growthTerm } = timingTerms(fit, age, p.change_7d);
+    const timing = 10 ** (ageTerm + growthTerm);
+    const score =
+      (timing *
+        confidenceOf(p, age, peerCounts.get(categoryKey(p.category)) ?? 0)) /
+      100;
+    if (Number.isFinite(score) && score > pressureMax) pressureMax = score;
+  }
+
+  const cal: Calibration = { fit, categories, holdout };
+  Object.defineProperty(cal, "pressureMax", {
+    value: pressureMax,
+    enumerable: false,
+  });
+  return cal;
 }
 
-/** The chain-breadth factor: each extra chain is a little more distribution. */
-export function breadthFactor(chains: string[], model: ModelConstants = MODEL): number {
-  const extra = Math.min(Math.max(chains.length - 1, 0), model.breadth_cap);
-  return 1 + model.breadth_step * extra;
-}
-
-/** The dust guard: a protocol under the floor is scaled down toward `dust_min_factor`. */
-export function sizeGuard(tvl: number, model: ModelConstants = MODEL): number {
-  if (!(tvl > model.dust_floor_usd)) return model.dust_min_factor;
-  if (tvl >= model.dust_full_usd) return 1;
-  const t = (tvl - model.dust_floor_usd) / (model.dust_full_usd - model.dust_floor_usd);
-  return model.dust_min_factor + (1 - model.dust_min_factor) * t;
-}
-
-/** The full factor breakdown for one protocol: what the dashboard shows as the reasoning. */
-export interface Explanation {
-  slug: string;
-  name: string;
-  category: string | null;
-  klass: string;
-  tvl_usd: number;
-  age_days: number | null;
-  change_7d: number | null;
-  chains: number;
-  /** The category multiple and where it came from. */
-  multiple: number;
-  prior: number;
-  observed: number | null;
-  peers: number;
-  weight: number;
-  growth_factor: number;
-  growth_clamped_pct: number;
-  momentum_factor: number;
-  maturity_factor: number;
-  maturity_bell: number;
-  breadth_factor: number;
-  size_guard: number;
-  /** The product of every factor, before rounding. */
-  raw_value: number;
-  /** The whole-dollar value the board carries. */
-  implied_value_usd: number;
-  /** A 0..100 confidence in the inputs, not in the price. */
-  confidence: number;
-  /**
-   * A 0..100 launch-pressure score: how much of the model's upside is coming from the *timing* and
-   * *momentum* signals rather than from raw size. It is the product of the maturity bell, the growth
-   * and momentum factors and the input confidence, normalised against the best row on the board, so
-   * a small protocol that is young and growing can out-score a large one that is old and flat.
-   */
-  pressure: number;
+/** The fitted gamma and peer count for one category (0 and 0 when the category is unseen). */
+function effectFor(category: string | null, cal: Calibration): CategoryEffect {
+  const key = categoryKey(category);
+  for (const c of cal.categories) if (c.name === key) return c;
+  return { name: key, peers: 0, medianResid: 0, gamma: 0, shrunk: true };
 }
 
 /**
- * Score one protocol. `table` is the calibration from `calibrate`; pass the same table for every row
- * so the board is one consistent model rather than a per-row guess.
+ * The age and growth terms as the board applies them: the age-only coefficient on the clamped age,
+ * and the stated weight on the clamped 7-day move. Both `explain` and the pressure denominator use
+ * this one function, so the value and the pressure stay consistent with each other.
  */
-export function explain(p: Protocol, asOf: string, table: Map<string, CategoryCalibration>, model: ModelConstants = MODEL): Explanation {
-  const cal = multipleFor(p.category, table);
+function timingTerms(
+  fit: ModelFit,
+  age: number | null,
+  change7d: number | null
+): { ageTerm: number; growth: number; growthTerm: number } {
+  const ageTerm = fit.ageApplied * Math.log10(Math.max(age ?? 0, 1));
+  const growth = 1 + (MODEL.growth_weight * momentumOf(change7d)) / 100;
+  const growthTerm = Math.log10(growth);
+  return { ageTerm, growth, growthTerm };
+}
+
+/**
+ * Score one protocol against a calibration: the implied value, its bands, the term-by-term arithmetic
+ * and the two input readings. `cal` must be the calibration built for the same snapshot, so every row
+ * on the board shares one surface.
+ */
+export function explain(
+  p: Protocol,
+  asOf: string,
+  cal: Calibration
+): Explanation {
   const age = ageDays(asOf, p.listed_at);
-  const g = growthFactor(p.change_7d, model);
-  const mo = momentumFactor(p.change_7d, model);
-  const m = maturityFactor(age, model);
-  const b = breadthFactor(p.chains, model);
-  const s = sizeGuard(p.tvl_usd, model);
-  const raw = p.tvl_usd * cal.multiple * g * mo * m * b * s;
-  const implied = Math.max(1, Math.round(raw));
-  const clamped = Math.min(model.growth_clamp_pct, Math.max(-model.growth_clamp_pct, finite(p.change_7d, 0)));
-  // Confidence is about the inputs, never the price: a known age, a reported 7-day move, several
-  // chains and a real TVL are what make a row's arithmetic trustworthy.
-  let confidence = 40;
-  if (age !== null) confidence += 20;
-  if (p.change_7d !== null) confidence += 15;
-  if (p.chains.length >= 2) confidence += 10;
-  if (p.tvl_usd >= 50_000_000) confidence += 10;
-  if (cal.peers >= 5) confidence += 5;
+  const effect = effectFor(p.category, cal);
+  const fit = cal.fit;
+
+  const alpha = fit.alpha;
+  const tvlTerm = fit.betaTvl * Math.log10(Math.max(p.tvl_usd, 1));
+  const { ageTerm, growthTerm } = timingTerms(fit, age, p.change_7d);
+  const missingTerm = fit.betaAgeMissing * (age === null ? 1 : 0);
+  const momTerm = growthTerm;
+  const chainTerm = fit.betaChains * Math.log10(Math.max(p.chains.length, 1));
+  const catTerm = effect.gamma;
+
+  let log10Implied =
+    alpha + tvlTerm + ageTerm + missingTerm + momTerm + chainTerm + catTerm;
+  if (!Number.isFinite(log10Implied)) log10Implied = 0;
+  log10Implied = Math.min(MAX_LOG10, Math.max(0, log10Implied));
+
+  const implied = Math.min(
+    MAX_USD,
+    Math.max(1, Math.round(10 ** log10Implied))
+  );
+  const confidence = confidenceOf(p, age, effect.peers);
+  const timing = 10 ** (ageTerm + momTerm);
+  const top = cal.pressureMax ?? 0;
+  const pressure =
+    top > 0 && Number.isFinite(timing)
+      ? round((timing * (confidence / 100) * 100) / top, 1)
+      : 0;
+
   return {
     slug: p.slug,
     name: p.name,
     category: p.category,
-    klass: cal.klass,
     tvl_usd: p.tvl_usd,
     age_days: age,
     change_7d: p.change_7d,
     chains: p.chains.length,
-    multiple: cal.multiple,
-    prior: cal.prior,
-    observed: cal.observed,
-    peers: cal.peers,
-    weight: cal.weight,
-    growth_factor: round4(g),
-    growth_clamped_pct: round4(clamped),
-    momentum_factor: round4(mo),
-    maturity_factor: round4(m),
-    maturity_bell: round4(maturityBell(age ?? model.maturity_peak_days, model)),
-    breadth_factor: round4(b),
-    size_guard: round4(s),
-    raw_value: Math.round(raw),
+    log10_implied: round(log10Implied, 4),
     implied_value_usd: implied,
-    confidence: Math.min(100, confidence),
-    // The raw pressure is the timing-and-momentum part of the model, before size. The board
-    // normalises it against its own best row, so the number is comparable within one snapshot.
-    pressure: Math.round(m * g * mo * (confidence / 100) * 1000) / 10,
+    low50: Math.max(1, Math.round(implied / fit.band50)),
+    high50: Math.round(implied * fit.band50),
+    low80: Math.max(1, Math.round(implied / fit.band80)),
+    high80: Math.round(implied * fit.band80),
+    // Rounded to four places: adding them reproduces the log10 value to within 1e-4, which is a
+    // tenth of a percent of the dollar figure, so the page's arithmetic is honest to the digit shown.
+    factors: {
+      alpha: round(alpha, 4),
+      tvl: round(tvlTerm, 4),
+      age: round(ageTerm, 4),
+      age_missing: round(missingTerm, 4),
+      momentum: round(momTerm, 4),
+      chains: round(chainTerm, 4),
+      category: round(catTerm, 4),
+    },
+    category_gamma: effect.gamma,
+    category_peers: effect.peers,
+    confidence,
+    pressure,
   };
 }
 
 /** The model's one-sentence statement, for the page's footer and the dossier. */
 export const MODEL_SENTENCE =
-  'Implied value is TVL times a category multiple calibrated from the snapshot\'s own live-token peers, ' +
-  'times a damped 7-day growth factor, times a maturity bell that peaks near ten months of running with ' +
-  'no token, times a chain-breadth bonus and a dust guard.';
+  "Implied value is a log-log regression of market cap on TVL, with a fitted per-category term, whose " +
+  "coefficients are estimated on the snapshot's own live-token peers, plus the 7-day move at a stated " +
+  "weight of 0.35 and the age term taken from the age-only fit, so that a protocol that has run for " +
+  "years without a token is read as older and a week of growth is read with the right sign.";

@@ -1,14 +1,23 @@
-// Farm plans: what a reader should actually do about a protocol, before or after it issues a token.
+// Farm plans: what a reader should actually do about a protocol, before or after it issues a token,
+// and what the plan pays against what it costs.
 //
 // Every step is derived from the protocol's own record: its category decides the action, its TVL
 // decides the capital and the gas, its age decides the hold window and whether an early-points window
 // is still open, its chain count decides how much bridging is involved. No protocol name is ever
-// special-cased, and no two protocols get the same plan because the name, the chain, the capital and
-// the hold window all enter the text.
+// special-cased.
+//
+// The plan is *costed*. The model's implied value is the protocol's fully diluted value; 6% of it is
+// the share a points programme tends to hand to early users, and a position's claim on that share is
+// its size relative to the protocol's TVL. Against that sits the cost: the gas to open and run the
+// position, plus the 5% a year the capital could earn anywhere else, for as long as it is committed.
+// A plan is worth doing when the expected airdrop beats its cost, thin when it comes within 35% of
+// covering it, and a skip when it does not. The verdict is arithmetic, not enthusiasm.
 //
 // A plan is 8 to 10 steps. Each step carries the action, what it costs and how long it takes, so the
 // dashboard can show the cost and the time as chips beside the sentence and board.json can carry the
-// same step as one string inside the gate's 20..600 character window.
+// same step as one string inside the gate's 20..600 character window. The step's own text names the
+// dollar figures it acts on, but never folds a price or a duration into the sentence: those live in
+// `cost` and `time`.
 
 import type { Protocol } from './value.ts';
 
@@ -24,13 +33,30 @@ export interface FarmStep {
   kind: 'setup' | 'position' | 'activity' | 'hold' | 'window' | 'risk' | 'verify' | 'exit' | 'log';
 }
 
-/** A protocol's plan: the steps, plus the figures the plan was built from. */
+/** The verdict the arithmetic produces: farm it, it is thin, or skip it. */
+export type Verdict = 'FARM' | 'THIN' | 'SKIP';
+
+/** A protocol's plan: the steps, the figures the plan was built from, and what it nets. */
 export interface FarmPlan {
   steps: FarmStep[];
   /** The capital one position needs, in whole dollars. */
   capital_usd: number;
+  /** The gas to open and run the position, in whole dollars. */
+  gas_usd: number;
   /** The hold window in days. */
   hold_days: number;
+  /** The capital's opportunity cost over the hold window, at 5% a year, in whole dollars. */
+  opportunity_usd: number;
+  /** 6% of the implied value, scaled by the position's share of TVL, in dollars. */
+  expected_airdrop_usd: number;
+  /** The same arithmetic at the top of the 50% band: what the good case pays. */
+  upside_usd: number;
+  /** gas + opportunity: what the plan actually costs. */
+  cost_usd: number;
+  /** expected airdrop minus cost, to the cent. */
+  net_usd: number;
+  /** FARM when net > 0, THIN when net > -0.35 * cost, SKIP otherwise. */
+  verdict: Verdict;
   /** The weekly qualifying actions the plan asks for. */
   cadence_per_week: number;
   /** The age band the plan was written for. */
@@ -40,6 +66,13 @@ export interface FarmPlan {
   /** The category class the action came from. */
   action_class: string;
 }
+
+/** The share of fully diluted value a points programme tends to hand to early users. */
+const AIRDROP_SHARE = 0.06;
+/** What the capital could earn elsewhere in a year. */
+const OPPORTUNITY_RATE = 0.05;
+/** How far below its own cost a plan may fall and still be thin rather than a skip. */
+const THIN_FLOOR = 0.35;
 
 /** The age band a protocol falls in, from its days since listing. */
 export function ageBand(age: number | null): FarmPlan['age_band'] {
@@ -52,12 +85,12 @@ export function ageBand(age: number | null): FarmPlan['age_band'] {
 
 /** The capital tier from TVL: a bigger protocol needs a bigger position to register. */
 export function capitalFor(tvl: number): number {
-  if (tvl >= 5_000_000_000) return 500;
-  if (tvl >= 1_000_000_000) return 300;
-  if (tvl >= 250_000_000) return 200;
-  if (tvl >= 50_000_000) return 120;
-  if (tvl >= 15_000_000) return 75;
-  return 50;
+  if (tvl >= 5_000_000_000) return 5000;
+  if (tvl >= 1_000_000_000) return 2000;
+  if (tvl >= 250_000_000) return 1000;
+  if (tvl >= 50_000_000) return 750;
+  if (tvl >= 15_000_000) return 500;
+  return 300;
 }
 
 /**
@@ -65,7 +98,7 @@ export function capitalFor(tvl: number): number {
  * language as well as its numbers: a mega protocol's programme is competitive and its points are
  * diluted, while a small one's is thin and its position can be a meaningful share of the pool.
  */
-export function sizeTier(tvl: number): 'mega' | 'large' | 'mid' | 'small' | 'micro' {
+export function sizeTier(tvl: number): FarmPlan['size_tier'] {
   if (tvl >= 5_000_000_000) return 'mega';
   if (tvl >= 1_000_000_000) return 'large';
   if (tvl >= 250_000_000) return 'mid';
@@ -91,7 +124,7 @@ function competitionNote(tvl: number): string {
 
 /** The gas estimate from the chain count and the capital: more chains, more bridging, more gas. */
 function gasFor(capital: number, chains: number): number {
-  const base = capital >= 300 ? 12 : capital >= 120 ? 8 : 5;
+  const base = capital >= 2000 ? 9 : capital >= 1000 ? 6 : 4;
   return base + Math.min(Math.max(chains - 1, 0), 4) * 2;
 }
 
@@ -145,7 +178,7 @@ function positionStep(p: Protocol, capital: number, chain: string): string {
     case 'cdp':
       return `Open a ${name} vault on ${chain} with $${capital} of ETH or staked ETH, mint the stable asset against it, and keep the debt at or under half the collateral.`;
     case 'perps':
-      return `Deposit $${capital} of USDC as margin on ${name} on ${chain} and trade $${capital * 3} of weekly volume in small, hedged positions rather than one large one.`;
+      return `Deposit $${capital} of USDC as margin on ${name} on ${chain} and trade $${capital * 3} of volume in small, hedged positions rather than one large one.`;
     case 'restaking':
       return `Restake $${capital} of liquid staking tokens through ${name} on ${chain} and keep the receipt token in the same wallet that made the deposit.`;
     case 'staking':
@@ -169,7 +202,7 @@ function positionStep(p: Protocol, capital: number, chain: string): string {
     case 'chain':
       return `Bridge $${capital} of USDC onto ${name} and use one native app on it, so the address has activity on the chain itself and not only a bridge deposit.`;
     default:
-      return `Deposit $${capital} of USDC into ${name} on ${chain} and keep the position open across several weeks rather than one transaction.`;
+      return `Deposit $${capital} of USDC into ${name} on ${chain} and keep the position open across several separate weeks rather than one transaction.`;
   }
 }
 
@@ -178,9 +211,9 @@ function secondActionStep(p: Protocol, capital: number, chain: string): string {
   const name = p.name;
   switch (actionClass(p.category)) {
     case 'lending':
-      return `Repay part of the ${name} loan and re-borrow it once, so the wallet shows a repayment history and not only an opening balance.`;
+      return `Repay $${Math.round(capital * 0.2)} of the ${name} loan and re-borrow it once, so the wallet shows a repayment history and not only an opening balance.`;
     case 'cdp':
-      return `Repay a slice of the ${name} debt and mint again, which shows the vault is managed rather than opened and abandoned.`;
+      return `Repay $${Math.round(capital * 0.15)} of the ${name} debt and mint again, which shows the vault is managed rather than opened and abandoned.`;
     case 'perps':
       return `Close one ${name} position at a profit and open another, so the record shows realised volume and not only deposits.`;
     case 'restaking':
@@ -188,7 +221,7 @@ function secondActionStep(p: Protocol, capital: number, chain: string): string {
     case 'staking':
       return `Claim the ${name} staking rewards once and restake them, so the position compounds and the claim is on the record.`;
     case 'rwa':
-      return `Redeem a small slice of the ${name} position and re-subscribe, which proves the redemption path works before you need it.`;
+      return `Redeem $${Math.round(capital * 0.1)} of the ${name} position and re-subscribe, which proves the redemption path works before you need it.`;
     case 'bridge':
       return `Bridge a small amount back out of ${chain} through ${name}, so both directions of the route are on the wallet's record.`;
     case 'dex':
@@ -206,44 +239,49 @@ function secondActionStep(p: Protocol, capital: number, chain: string): string {
     case 'chain':
       return `Make one swap and one vote on ${name}, so the address is a participant on the chain and not only a bridged balance.`;
     default:
-      return `Make a second, smaller deposit into ${name} on ${chain} a week after the first, so the record shows a returning user.`;
+      return `Make a second, smaller deposit of $${Math.round(capital * 0.25)} into ${name} on ${chain} a week after the first, so the record shows a returning user.`;
   }
 }
 
-/** The risk step: the failure mode that actually matters for this category. */
+/**
+ * The risk step: how competitive the programme is, and the failure mode that actually matters for
+ * this category. The competition note comes first because it sets the size of the prize; the failure
+ * mode comes second because it sets the size of the loss.
+ */
 function riskStep(p: Protocol, chain: string): string {
   const name = p.name;
+  const stake = `Set the expectation before you deposit: ${competitionNote(p.tvl_usd)}.`;
   switch (actionClass(p.category)) {
     case 'lending':
-      return `Watch ${name}'s utilisation and the collateral factor: a utilisation above 90% can block withdrawals, so keep a second exit in mind.`;
+      return `${stake} Watch ${name}'s utilisation and the collateral factor, because above 90% withdrawals can block and the deposit is stuck until borrowers repay.`;
     case 'cdp':
-      return `Watch the ${name} collateral ratio daily: a sharp move in the collateral asset can liquidate the vault before you can add margin.`;
+      return `${stake} Watch the ${name} collateral ratio, because a sharp move in the collateral asset can liquidate the vault before you can add margin.`;
     case 'perps':
-      return `Cap the ${name} margin at what you can lose outright, because a liquidation on a perps venue takes the whole position and not a slice.`;
+      return `${stake} A liquidation on ${name} takes the whole margin and not a slice, so only deposit what you can lose outright.`;
     case 'restaking':
-      return `Read which operators ${name} delegates to: a slashing event on one operator can cut the restaked principal, not just the reward.`;
+      return `${stake} Read which operators ${name} delegates to, because a slashing event can cut the restaked principal and not just the reward.`;
     case 'staking':
-      return `Check ${name}'s validator set and its slashing history before staking, and keep the receipt token's issuer in view.`;
+      return `${stake} Check ${name}'s validator set and slashing history, and keep the receipt token's issuer in view, because the receipt is only as good as the stake behind it.`;
     case 'rwa':
-      return `Read ${name}'s issuer terms for redemption gates and transfer restrictions: an RWA position can be locked when you most want out.`;
+      return `${stake} Read ${name}'s issuer terms for redemption gates and transfer restrictions, because an RWA position can be locked when you most want out.`;
     case 'bridge':
-      return `Treat ${name} as a smart-contract risk first: bridge exploits are the largest single loss category, so bridge only what you would stake twice.`;
+      return `${stake} Treat ${name} as a smart-contract risk first, because bridge exploits are the largest single loss category and the funds sit in the contract while they cross.`;
     case 'dex':
-      return `Set the ${name} range wide enough to survive a 20% week, because an out-of-range position earns nothing while it waits.`;
+      return `${stake} Set the ${name} range wide enough to survive a 20% week, because an out-of-range position earns nothing while it waits.`;
     case 'curator':
-      return `Read the ${name} vault's allocation and its curator fee: a curator can move the strategy, and your deposit follows it.`;
+      return `${stake} Read the ${name} vault's allocation and curator fee, because the curator can move the strategy and your deposit follows it.`;
     case 'yield':
-      return `Check whether ${name}'s yield comes from emissions or from fees: an emission-funded rate collapses when the programme ends.`;
+      return `${stake} Check whether ${name}'s yield comes from emissions or from fees, because an emission-funded rate collapses when the programme ends.`;
     case 'prediction':
-      return `Size each ${name} market position as a full loss, because a resolved market pays nothing to the losing side.`;
+      return `${stake} Size each ${name} market as a full loss, because a resolved market pays nothing to the losing side.`;
     case 'insurance':
-      return `Read what ${name} actually covers and what it excludes, because a policy that does not pay on the event you fear is not cover.`;
+      return `${stake} Read what ${name} actually covers and what it excludes, because cover that does not pay on the event you fear is not cover.`;
     case 'launchpad':
-      return `Check the ${name} vesting and lock-up before joining a raise: an allocation you cannot sell for a year is not a profit.`;
+      return `${stake} Check the ${name} vesting and lock-up, because an allocation you cannot sell for a year is not a profit.`;
     case 'chain':
-      return `Check ${name}'s bridge and sequencer assumptions: a chain whose sequencer stops can strand the balance you bridged in.`;
+      return `${stake} Check ${name}'s bridge and sequencer assumptions, because a chain whose sequencer stops can strand the balance you bridged in.`;
     default:
-      return `Read ${name}'s audit reports and its admin keys before depositing, and prefer a protocol whose upgrade path is timelocked.`;
+      return `${stake} Read ${name}'s audits and admin keys before depositing, and prefer a protocol whose upgrade path is timelocked.`;
   }
 }
 
@@ -251,36 +289,42 @@ function riskStep(p: Protocol, chain: string): string {
 function verifyStep(p: Protocol, chain: string): string {
   const name = p.name;
   const record = p.gecko_id === null && p.symbol === null ? 'records no token and no CoinGecko id' : 'records a token';
-  return `Verify the claim yourself: DefiLlama's entry for ${name} ${record}, so open its own docs and its ${chain} contract before you commit capital, and never trust a claim page that asks for a signature.`;
+  return `Verify the claim yourself: DefiLlama's entry for ${name} ${record}, so open its own docs and its ${chain} contract before you commit any of the capital, and never trust a claim page that asks for a signature.`;
 }
 
-/** The age-specific window step: young protocols have an open points window, old ones do not. */
-function windowStep(p: Protocol, age: number | null, hold: number): string {
+/**
+ * The window step: whether an early-points window is still open at this age, and what the model's
+ * band says the position is worth. The three figures are the plan's own stake in the model, so a
+ * reader can see what the upside is before deciding how much of the capital to commit.
+ */
+function windowStep(p: Protocol, age: number | null, expected: number, downside: number, upside: number): string {
   const name = p.name;
   const band = ageBand(age);
+  const worth = `On the model's numbers this position is worth $${expected.toFixed(2)} expected, $${downside.toFixed(2)} at the bottom of the 50% band and $${upside.toFixed(2)} at the top.`;
   if (band === 'new') {
     return `${name} has run ${age} days with no token, which is the earliest window there is: join now, because a points programme announced later rarely counts activity from before its start date.`;
   }
   if (band === 'young') {
-    return `${name} has run ${age} days with no token, so the first season of any programme is likely still open: start now and keep the position through at least ${hold} days.`;
+    return `${name} has run ${age} days with no token, so the first season of any programme is likely still open: start now and keep the capital in place through the whole qualifying window. ${worth}`;
   }
   if (band === 'established') {
-    return `${name} has run ${age} days with no token, which is long enough that a programme may already be running: check for an existing points page before you start a new position.`;
+    return `${name} has run ${age} days with no token, which is long enough that a programme may already be running: check for an existing points page before you start a new position. ${worth}`;
   }
   if (band === 'legacy') {
-    return `${name} has run ${age} days with no token, so treat a launch as unlikely and size the position as a yield trade with a lottery ticket attached, not as an airdrop farm.`;
+    return `${name} has run ${age} days with no token, so treat a launch as unlikely and size the position as a yield trade with a lottery ticket attached, not as an airdrop farm. ${worth}`;
   }
-  return `${name} records no listing date, so the age of any programme is unknown: start small and let the first month's activity decide whether to add.`;
+  return `${name} records no listing date, so the age of any programme is unknown: start small and let the first month's activity decide whether to add. ${worth}`;
 }
 
 /** The bridging step, only when the protocol runs on more than one chain. */
-function bridgeStep(p: Protocol, capital: number, gas: number): FarmStep | null {
+function bridgeStep(p: Protocol, capital: number): FarmStep | null {
   const second = secondChain(p);
   if (second === null) return null;
   const name = p.name;
+  const moved = Math.round(capital * 0.25);
   return {
-    text: `${name} counts TVL on ${p.chains.length} chains: put a quarter of the position on ${second} as well as ${chainOf(p)}, because a multi-chain protocol usually weights its programme by chain.`,
-    cost: `about $${gas} of bridging gas and a quarter of the $${capital}`,
+    text: `${name} counts TVL on ${p.chains.length} chains: put $${moved} of the position on ${second} as well as ${chainOf(p)}, because a multi-chain protocol usually weights its programme by chain.`,
+    cost: `$${moved} of the capital moves chain, plus the bridge fee`,
     time: '20 minutes',
     kind: 'position',
   };
@@ -288,9 +332,12 @@ function bridgeStep(p: Protocol, capital: number, gas: number): FarmStep | null 
 
 /**
  * A protocol's farm plan. Eight to ten steps, each an action with a cost and a time, derived from the
- * protocol's category, chains, TVL and age. The plan always carries a risk step and a verify step.
+ * protocol's category, chains, TVL and age, and costed against the model's implied value.
+ *
+ * `age`, `implied`, `low50` and `high50` are the model's numbers for this protocol; the plan does not
+ * re-derive them, so the page's arithmetic and the plan's arithmetic are the same arithmetic.
  */
-export function farmPlan(p: Protocol, age: number | null): FarmPlan {
+export function farmPlan(p: Protocol, age: number | null, implied: number, low50: number, high50: number): FarmPlan {
   const chain = chainOf(p);
   const capital = capitalFor(p.tvl_usd);
   const gas = gasFor(capital, p.chains.length);
@@ -298,9 +345,22 @@ export function farmPlan(p: Protocol, age: number | null): FarmPlan {
   const band = ageBand(age);
   const cadence = band === 'new' ? 3 : band === 'young' ? 2 : 1;
 
+  // The position's claim on the programme is its share of TVL, capped at the whole programme: a
+  // $500 position cannot claim more than 100% of a protocol's early-user share, and for most live
+  // peers the ratio is far below one. The band figures are the model's own low50 and high50, so the
+  // plan's arithmetic and the board's arithmetic are one arithmetic.
+  const share = p.tvl_usd > 0 ? Math.min(1, capital / p.tvl_usd) : 1;
+  const opportunity = Math.round(capital * OPPORTUNITY_RATE * (hold / 365));
+  const expected = Math.round(AIRDROP_SHARE * implied * share * 1000) / 1000;
+  const downside = Math.round(AIRDROP_SHARE * low50 * share * 1000) / 1000;
+  const upside = Math.round(AIRDROP_SHARE * high50 * share * 1000) / 1000;
+  const cost = gas + opportunity;
+  const net = Math.round((expected - cost) * 100) / 100;
+  const verdict: Verdict = net > 0 ? 'FARM' : net > -THIN_FLOOR * cost ? 'THIN' : 'SKIP';
+
   const steps: FarmStep[] = [
     {
-      text: `Open a fresh wallet for ${p.name} alone, fund it from an exchange rather than from your main wallet, and keep the seed phrase offline so a contract risk cannot reach the rest of your holdings.`,
+      text: `Open a fresh wallet for ${p.name} alone, fund it with the $${capital} the position needs from an exchange rather than from your main wallet, and keep the seed phrase offline so a contract risk cannot reach the rest of your holdings.`,
       cost: `under $${gas} of gas for the first transaction`,
       time: '10 minutes',
       kind: 'setup',
@@ -311,45 +371,44 @@ export function farmPlan(p: Protocol, age: number | null): FarmPlan {
       time: '15 minutes to set up',
       kind: 'position',
     },
-    {
+  ];
+
+  // A multi-chain protocol gets the bridging step; a single-chain one gets the follow-on action
+  // instead. Either way the plan stays inside its eight-to-ten step budget.
+  const bridge = bridgeStep(p, capital);
+  if (bridge !== null) {
+    steps.push(bridge);
+  } else {
+    steps.push({
       text: secondActionStep(p, capital, chain),
-      cost: `no new capital, about $${Math.max(2, Math.round(gas / 2))} of gas`,
+      cost: 'no new capital, and a few dollars of gas',
       time: '10 minutes',
       kind: 'activity',
-    },
+    });
+  }
+
+  steps.push(
     {
-      text: `Make ${cadence} qualifying action${cadence === 1 ? '' : 's'} a week on ${p.name} — a deposit, a borrow, a swap or a vote — because programmes weight distinct weeks far above one large transaction.`,
-      cost: `about $${cadence * 2} of gas a week`,
+      text: `Make ${cadence} qualifying action${cadence === 1 ? '' : 's'} on ${p.name} — a deposit, a borrow, a swap or a vote — spread across separate weeks, and keep the $${capital} position inside the protocol, because programmes weight distinct weeks of activity far above one large transaction.`,
+      cost: 'a few dollars of gas for each action',
       time: `${cadence * 10} minutes a week`,
       kind: 'activity',
     },
     {
-      text: `Hold the ${p.name} position for at least ${hold} days so it is counted in more than one snapshot, and do not move the capital out and back to fake activity.`,
+      text: `Hold the $${capital} position on ${p.name} through the whole qualifying window and do not move the capital out and back to fake activity, because a withdrawal resets the record the programme reads.`,
       cost: `the $${capital} stays locked in the position`,
       time: `${hold} days`,
       kind: 'hold',
     },
     {
-      text: windowStep(p, age, hold),
+      text: windowStep(p, age, expected, downside, upside),
       cost: 'nothing beyond the position you already hold',
       time: '5 minutes to check',
       kind: 'window',
     },
     {
-      text: `Set your expectation before you deposit: ${competitionNote(p.tvl_usd)}. Write down what a 1% share of a plausible programme would be worth, and do not deposit more than that number justifies.`,
-      cost: 'no fee, and it is the cheapest step in the plan',
-      time: '10 minutes',
-      kind: 'risk',
-    },
-  ];
-
-  const bridge = bridgeStep(p, capital, gas);
-  if (bridge !== null) steps.push(bridge);
-
-  steps.push(
-    {
       text: riskStep(p, chain),
-      cost: 'no fee, but the whole position is at risk',
+      cost: `up to the $${capital} at risk, against $${expected.toFixed(2)} expected and $${upside.toFixed(2)} at the top of the band`,
       time: '15 minutes of reading',
       kind: 'risk',
     },
@@ -360,13 +419,13 @@ export function farmPlan(p: Protocol, age: number | null): FarmPlan {
       kind: 'verify',
     },
     {
-      text: `Before you withdraw from ${p.name}, claim only from the protocol's own published page, and treat any direct message offering an early claim as a theft attempt.`,
+      text: `Before you withdraw from ${p.name}, claim only from the protocol's own published page, and treat any direct message offering an early claim on the $${upside.toFixed(2)} upside as a theft attempt.`,
       cost: 'no fee to claim, and a signature request is a red flag',
       time: '10 minutes',
       kind: 'exit',
     },
     {
-      text: `Write the wallet address, the entry date, the $${capital} and every ${p.name} transaction into a farm log, so you can repeat the position or unwind it without guessing.`,
+      text: `Write the wallet address, the entry date, the $${capital}, the $${expected.toFixed(2)} expected airdrop and every ${p.name} transaction into a farm log, so you can repeat the position or unwind it without guessing.`,
       cost: 'nothing but the log',
       time: '5 minutes',
       kind: 'log',
@@ -376,7 +435,14 @@ export function farmPlan(p: Protocol, age: number | null): FarmPlan {
   return {
     steps,
     capital_usd: capital,
+    gas_usd: gas,
     hold_days: hold,
+    opportunity_usd: opportunity,
+    expected_airdrop_usd: expected,
+    upside_usd: upside,
+    cost_usd: cost,
+    net_usd: net,
+    verdict,
     cadence_per_week: cadence,
     age_band: band,
     size_tier: sizeTier(p.tvl_usd),

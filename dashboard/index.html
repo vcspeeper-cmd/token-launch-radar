@@ -4,176 +4,156 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Token Radar — pre-token protocols ranked by implied value</title>
-<meta name="description" content="A ranked board of the protocols that record no token, scored by an implied value derived from TVL, seven-day growth and time running without a token.">
+<meta name="description" content="A fitted log-log value model for the protocols that record no token: TVL, the 7-day move and the days run without a token, with a costed farm plan for every row.">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <a class="skip" href="#board">Skip to the board</a>
 
-<header class="masthead">
-  <div class="masthead-inner">
+<header class="mast">
+  <div class="wrap mast-in">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true"></span>
-      <div class="brand-text">
+      <span class="dish" aria-hidden="true"></span>
+      <div class="brand-txt">
         <h1>Token Radar</h1>
-        <p class="brand-sub">Protocols that record no token, ranked by what one would be worth</p>
+        <p class="tag">Every protocol that records no token, ranked by what a token would be worth.</p>
       </div>
     </div>
-    <dl class="masthead-meta">
-      <div><dt>Snapshot</dt><dd id="meta-as-of">—</dd></div>
-      <div><dt>Source</dt><dd id="meta-source">—</dd></div>
-      <div><dt>Model</dt><dd id="meta-model">—</dd></div>
+    <dl class="meta">
+      <div><dt>Snapshot</dt><dd id="m-asof">—</dd></div>
+      <div><dt>Source</dt><dd id="m-src">—</dd></div>
+      <div><dt>Model</dt><dd id="m-ver">—</dd></div>
     </dl>
   </div>
 </header>
 
-<main class="shell">
+<main class="wrap">
+
   <section class="kpis" aria-label="Headline figures">
-    <article class="kpi">
-      <p class="kpi-label">Protocols scanned</p>
-      <p class="kpi-value" id="kpi-protocols">—</p>
-      <p class="kpi-note" id="kpi-protocols-note">—</p>
-    </article>
-    <article class="kpi kpi-accent">
-      <p class="kpi-label">Pre-token opportunities</p>
-      <p class="kpi-value" id="kpi-pretoken">—</p>
-      <p class="kpi-note" id="kpi-pretoken-note">—</p>
-    </article>
-    <article class="kpi">
-      <p class="kpi-label">Total implied value</p>
-      <p class="kpi-value" id="kpi-total">—</p>
-      <p class="kpi-note" id="kpi-total-note">—</p>
-    </article>
-    <article class="kpi">
-      <p class="kpi-label">Already trading</p>
-      <p class="kpi-value" id="kpi-live">—</p>
-      <p class="kpi-note" id="kpi-live-note">—</p>
-    </article>
+    <article class="kpi"><p class="kl">Protocols read</p><p class="kfig" id="k-prot">—</p><p class="kn" id="k-prot-n">—</p></article>
+    <article class="kpi hi"><p class="kl">Ranked pre-token</p><p class="kfig" id="k-pre">—</p><p class="kn" id="k-pre-n">—</p></article>
+    <article class="kpi"><p class="kl">Total implied value</p><p class="kfig" id="k-tot">—</p><p class="kn" id="k-tot-n">—</p></article>
+    <article class="kpi"><p class="kl">Median implied value</p><p class="kfig" id="k-med">—</p><p class="kn" id="k-med-n">—</p></article>
+    <article class="kpi"><p class="kl">Fit quality</p><p class="kfig" id="k-fit">—</p><p class="kn" id="k-fit-n">—</p></article>
+    <article class="kpi"><p class="kl">Worth farming</p><p class="kfig" id="k-farm">—</p><p class="kn" id="k-farm-n">—</p></article>
   </section>
 
-  <section class="controls" aria-label="Filters and sorting">
-    <div class="field field-search">
+  <section class="panel" aria-label="Every protocol in exactly one class">
+    <div class="phead">
+      <h2>All <span id="l-total">—</span> protocols, exactly one class each</h2>
+      <p class="ph-note" id="l-note">—</p>
+    </div>
+    <div class="lbar" id="lbar" role="img" aria-label="Every protocol by class"></div>
+    <ul class="lkey" id="lkey"></ul>
+  </section>
+
+  <section class="panel model" aria-label="The value model and its evidence">
+    <div class="phead">
+      <h2>A fitted value, not a table of multiples</h2>
+      <p class="ph-note" id="m-sentence">—</p>
+    </div>
+    <div class="mgrid">
+      <div class="mcol">
+        <h3>Fitted equation <span class="h3n">· ordinary least squares in log₁₀ space</span></h3>
+        <p class="eq" id="eq">—</p>
+        <table class="kv" id="factors"><caption class="sr">Fitted coefficients</caption></table>
+        <p class="note" id="age-note">—</p>
+      </div>
+      <div class="mcol">
+        <h3>Holdout test <span class="h3n">· predict the peers the fit never saw</span></h3>
+        <table class="kv" id="holdout"><caption class="sr">Holdout results</caption></table>
+        <p class="note" id="ho-note">—</p>
+      </div>
+    </div>
+    <div class="catwrap">
+      <h3>Category term γ <span class="h3n">· fitted where at least 4 live peers exist; otherwise the size law alone</span></h3>
+      <ul class="cats" id="cats"></ul>
+    </div>
+  </section>
+
+  <section class="panel scatter" aria-label="TVL against market cap, both in log dollars">
+    <div class="phead">
+      <h2>Where a protocol's size lands it</h2>
+      <p class="ph-note">Log TVL against log market cap. Muted dots are the live peers the fit learned from; amber ghosts are the ranked pre-token rows projected through the equation. The line is the fit.</p>
+    </div>
+    <div class="chart"><svg id="chart" viewBox="0 0 1360 250" role="img" aria-label="Scatter of log TVL against log market cap with the fitted line"></svg></div>
+    <ul class="chart-key">
+      <li><i class="dot live"></i>live peer</li>
+      <li><i class="dot pre"></i>ranked pre-token row</li>
+      <li><i class="ln"></i>fitted line</li>
+    </ul>
+  </section>
+
+  <section class="controls" aria-label="Filter and sort the board">
+    <div class="field srch">
       <label for="q">Search</label>
-      <input id="q" type="search" placeholder="Name, slug or category…" autocomplete="off" spellcheck="false">
+      <input id="q" type="search" placeholder="Name, slug, category or chain" autocomplete="off" spellcheck="false">
     </div>
-    <div class="field">
-      <label for="status">Token status</label>
-      <select id="status">
-        <option value="pre">Pre-token only</option>
-        <option value="live">Already trading</option>
-        <option value="all">Both</option>
-      </select>
-    </div>
-    <div class="field">
-      <label for="tvl">Minimum TVL</label>
-      <select id="tvl">
-        <option value="0">Any size</option>
-        <option value="10000000">$10M and up</option>
-        <option value="50000000">$50M and up</option>
-        <option value="250000000">$250M and up</option>
-        <option value="1000000000">$1B and up</option>
-      </select>
-    </div>
-    <div class="field">
-      <label for="sort">Sort by</label>
-      <select id="sort">
-        <option value="implied">Implied value</option>
-        <option value="pressure">Launch pressure</option>
-        <option value="tvl">TVL</option>
-        <option value="growth">7-day growth</option>
-        <option value="age">Age without a token</option>
-        <option value="name">Name</option>
-        <option value="multiple">Category multiple</option>
-      </select>
-    </div>
-    <div class="field field-dir">
-      <label for="dir">Order</label>
-      <button id="dir" type="button" class="toggle" aria-pressed="true" title="Toggle ascending or descending (press D)">Descending</button>
-    </div>
+    <div class="field"><label for="f-cat">Category</label><select id="f-cat"></select></div>
+    <div class="field"><label for="f-chain">Chain</label><select id="f-chain"></select></div>
+    <div class="field"><label for="f-verdict">Verdict</label><select id="f-verdict">
+      <option value="">Any verdict</option><option value="FARM">FARM</option><option value="THIN">THIN</option><option value="SKIP">SKIP</option>
+    </select></div>
+    <div class="field"><label for="f-tvl">Minimum TVL</label><select id="f-tvl">
+      <option value="0">Any size</option><option value="10000000">$10M and up</option><option value="50000000">$50M and up</option>
+      <option value="250000000">$250M and up</option><option value="1000000000">$1B and up</option><option value="5000000000">$5B and up</option>
+    </select></div>
+    <div class="field"><label for="sort">Sort by</label><select id="sort">
+      <option value="implied">Implied value</option><option value="tvl">TVL</option><option value="change">7-day move</option>
+      <option value="age">Age without a token</option><option value="net">Net after cost</option><option value="confidence">Input confidence</option><option value="name">Name</option>
+    </select></div>
+    <button type="button" class="reset" id="reset">Reset</button>
     <p class="count" id="count" role="status" aria-live="polite">—</p>
-    <p class="seg" id="seg" hidden></p>
   </section>
 
-  <section class="chips" aria-label="Category filter">
-    <span class="chips-label">Category</span>
-    <div class="chips-row" id="chips"></div>
-    <button id="chips-clear" type="button" class="link-button" hidden>Clear categories</button>
-  </section>
-
-  <section class="board-panel" id="board" tabindex="-1">
-    <div class="board-head">
-      <h2 id="board-title">The board</h2>
-      <p class="board-note" id="board-note">Ranked by implied value = TVL × category multiple × growth × momentum × maturity × breadth × dust guard. Click any row for its own arithmetic and its farm plan.</p>
+  <section class="boardpanel" id="board" tabindex="-1" aria-label="The ranked board">
+    <div class="bhead">
+      <h2>The board <span class="h3n" id="b-sub">· ranked by implied value</span></h2>
+      <p class="bnote">Click a row for its arithmetic, its bands and its full farm plan. Column headers sort.</p>
     </div>
-    <p class="legend">Launch pressure = maturity × growth × momentum × input confidence, with size left out on purpose: sort by it to find young, moving protocols rather than the biggest ones.</p>
-    <div class="table-wrap">
-      <table id="table">
+    <div class="tablewrap">
+      <table class="board" id="board-table">
         <thead>
           <tr>
-            <th scope="col" class="col-rank">#</th>
-            <th scope="col" class="col-name">Protocol</th>
-            <th scope="col" class="col-cat">Category</th>
-            <th scope="col" class="col-num">TVL</th>
-            <th scope="col" class="col-num">7d</th>
-            <th scope="col" class="col-num">Age</th>
-            <th scope="col" class="col-num">Pressure</th>
-            <th scope="col" class="col-num">Implied value</th>
-            <th scope="col" class="col-bar">Share of rank 1</th>
+            <th class="c-rank" scope="col">#</th>
+            <th class="c-proto" scope="col"><button type="button" class="th" data-sort="name">Protocol</button></th>
+            <th class="c-num" scope="col"><button type="button" class="th" data-sort="tvl">TVL</button></th>
+            <th class="c-num" scope="col"><button type="button" class="th" data-sort="change">7d</button></th>
+            <th class="c-num" scope="col"><button type="button" class="th" data-sort="age">Age</button></th>
+            <th class="c-impl" scope="col"><button type="button" class="th" data-sort="implied">Implied value · 50% band</button></th>
+            <th class="c-verdict" scope="col"><button type="button" class="th" data-sort="net">Verdict</button></th>
+            <th class="c-tease" scope="col">First farm step</th>
           </tr>
         </thead>
         <tbody id="tbody"></tbody>
       </table>
+      <div class="empty" id="empty" hidden>
+        <p class="empty-t">No protocol matches those filters.</p>
+        <p>Try a shorter search, a lower TVL floor, or any category.</p>
+        <button type="button" class="btn" id="empty-reset">Reset every filter</button>
+      </div>
     </div>
-    <div class="empty" id="empty" hidden>
-      <p class="empty-title">No protocol matches those filters.</p>
-      <p>Try a shorter search, a lower TVL floor, or clear the category chips.</p>
-      <button type="button" class="button primary" id="empty-reset">Reset every filter</button>
-    </div>
-  </section>
-
-  <section class="histogram" aria-label="Distribution of implied values">
-    <div class="board-head">
-      <h2>Where the value sits</h2>
-      <p class="board-note">Every ranked protocol, by implied value. The board is bottom-heavy: most protocols are small, and a handful carry the total.</p>
-    </div>
-    <div class="hist" id="hist"></div>
-  </section>
-
-  <section class="method" aria-label="How the model works">
-    <h2>How the implied value is built</h2>
-    <p class="method-lede" id="method-sentence">—</p>
-    <ol class="method-steps">
-      <li><b>Category multiple.</b> The median market-cap-to-TVL ratio of the snapshot's own live-token peers in that category, clamped and shrunk toward a written prior by sample size. A category with fifteen live peers is trusted; one with a single peer falls back to the prior.</li>
-      <li><b>Growth and momentum.</b> The seven-day TVL move, clamped to ±50% and damped to 35% of its size, plus a signed-square-root read of the same move so a protocol bleeding deposits is penalised more than a flat one.</li>
-      <li><b>Maturity bell.</b> An asymmetric log-normal curve peaking near 300 days of running with no token: the fall-off is gentle below the peak and steep above it, because a protocol that has run for years with no token has had every chance to issue one.</li>
-      <li><b>Breadth and dust.</b> Each extra chain adds 4% up to five chains; a protocol under $5M of TVL is scaled down toward 75%.</li>
-    </ol>
-    <p class="method-foot">No protocol name is special-cased: the same function scores every row, and every row's detail view shows its own arithmetic.</p>
   </section>
 </main>
 
 <footer class="foot">
   <p id="foot-model">—</p>
-  <p class="foot-fine">The implied value is this dashboard's own claim, not make.fun's, and not a prediction that a token is issued. A protocol that records no token may still have one its record does not carry: verify before you commit capital.</p>
+  <p id="foot-src">—</p>
+  <p class="fine">The board is this entry's claim, not make.fun's, and not a prediction that a token is issued. A protocol whose record carries no token may still have one: verify from primary sources before committing capital.</p>
 </footer>
 
-<aside class="drawer" id="drawer" hidden aria-labelledby="drawer-title" role="dialog" aria-modal="false">
-  <div class="drawer-inner">
-    <div class="drawer-head">
-      <div>
-        <p class="drawer-kicker" id="drawer-kicker">—</p>
-        <h2 id="drawer-title">—</h2>
-        <p class="drawer-sub" id="drawer-sub">—</p>
-      </div>
-      <button type="button" class="close" id="drawer-close" aria-label="Close the detail view (Esc)">Close</button>
+<aside class="drawer" id="drawer" hidden aria-labelledby="d-title" aria-modal="false" role="dialog">
+  <div class="dhead">
+    <div class="dhead-txt">
+      <p class="kicker" id="d-kicker">—</p>
+      <h2 id="d-title">—</h2>
+      <p class="dsub" id="d-sub">—</p>
     </div>
-    <div id="drawer-body"></div>
+    <button type="button" class="close" id="d-close" aria-label="Close the detail view (Escape)">Close</button>
   </div>
+  <div class="dbody" id="d-body"></div>
 </aside>
 
-/* The data is generated beside the page's directory: main.ts writes <out>/data.js and copies
-   dashboard/ to <out>/dashboard/, so the page loads ../data.js. A copy inside dashboard/ is also
-   accepted, so the page works from either layout. */
 <script src="../data.js"></script>
 <script src="data.js"></script>
 <script src="app.js"></script>

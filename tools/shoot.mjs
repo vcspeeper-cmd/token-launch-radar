@@ -140,17 +140,14 @@ await shoot('2-detail.png');
 //    stray search term. The segment line under the controls says what the slice is worth.
 await page.setViewportSize({ width: 1440, height: 900 });
 await page.evaluate(() => {
-  const close = document.getElementById('drawer-close');
+  const close = document.getElementById('d-close');
   if (close) close.click();
-  const status = document.getElementById('status');
-  status.value = 'pre';
-  status.dispatchEvent(new Event('change', { bubbles: true }));
-  const tvl = document.getElementById('tvl');
+  const verdict = document.getElementById('f-verdict');
+  verdict.value = 'FARM';
+  verdict.dispatchEvent(new Event('change', { bubbles: true }));
+  const tvl = document.getElementById('f-tvl');
   tvl.value = '50000000';
   tvl.dispatchEvent(new Event('change', { bubbles: true }));
-  const chips = [...document.querySelectorAll('#chips .chip')];
-  const target = chips.find((c) => /^Lending/.test(c.textContent));
-  if (target) target.click();
   const q = document.getElementById('q');
   q.value = '';
   q.dispatchEvent(new Event('input', { bubbles: true }));
@@ -163,9 +160,9 @@ await shoot('3-filtered.png');
 //    reads the value model as a method rather than as a number that happens to be on screen.
 await page.setViewportSize({ width: 1440, height: 1100 });
 await page.evaluate(() => {
-  const close = document.getElementById('drawer-close');
+  const close = document.getElementById('d-close');
   if (close) close.click();
-  const method = document.querySelector('.method');
+  const method = document.querySelector('.model');
   if (method) method.scrollIntoView({ block: 'start' });
 });
 await page.waitForTimeout(350);
